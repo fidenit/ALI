@@ -4,10 +4,14 @@ use eframe::egui;
 
 use crate::{App, llm, sys, ui, vault};
 
-const PANEL: egui::Color32 = egui::Color32::from_rgb(21, 22, 25);
-const PANEL_EDGE: egui::Color32 = egui::Color32::from_rgb(33, 34, 38);
-const FIELD: egui::Color32 = egui::Color32::from_rgb(28, 29, 32);
-const FIELD_EDGE: egui::Color32 = egui::Color32::from_rgb(50, 51, 56);
+#[allow(non_snake_case)]
+fn PANEL() -> egui::Color32 { ui::ZONE() }
+#[allow(non_snake_case)]
+fn PANEL_EDGE() -> egui::Color32 { ui::ZONE_EDGE() }
+#[allow(non_snake_case)]
+fn FIELD() -> egui::Color32 { if ui::is_light() { egui::Color32::WHITE } else { egui::Color32::from_rgb(28, 29, 32) } }
+#[allow(non_snake_case)]
+fn FIELD_EDGE() -> egui::Color32 { if ui::is_light() { egui::Color32::from_rgb(210, 210, 215) } else { egui::Color32::from_rgb(50, 51, 56) } }
 pub const WIDTH: f32 = 444.0;
 
 /// 이름이 붙은 스위치. 손잡이가 오른쪽에 밝게 있으면 켜진 것, 왼쪽에 어둡게 있으면 꺼진 것. 눌렸으면 true.
@@ -18,12 +22,12 @@ fn switch(ui: &mut egui::Ui, ctx: &egui::Context, id: &str, label: &str, on: boo
         let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * k) as u8;
         egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
     };
-    p.rect_filled(r.rect, 20.0, FIELD);
-    p.rect_stroke(r.rect, 20.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
-    p.text(r.rect.left_center() + egui::vec2(18.0, 0.0), egui::Align2::LEFT_CENTER, label, ui::bold(13.0), lerp(ui::DIM, ui::TEXT));
+    p.rect_filled(r.rect, 20.0, FIELD());
+    p.rect_stroke(r.rect, 20.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+    p.text(r.rect.left_center() + egui::vec2(18.0, 0.0), egui::Align2::LEFT_CENTER, label, ui::bold(13.0), lerp(ui::DIM(), ui::TEXT()));
     let track = egui::Rect::from_center_size(r.rect.right_center() - egui::vec2(32.0, 0.0), egui::vec2(36.0, 20.0));
-    p.rect_filled(track, 10.0, lerp(egui::Color32::from_rgb(52, 53, 58), ui::TEXT));
-    p.circle_filled(egui::pos2(track.left() + 10.0 + 16.0 * k, track.center().y), 7.0, lerp(ui::DIM, FIELD));
+    p.rect_filled(track, 10.0, lerp(if ui::is_light() { egui::Color32::from_rgb(208, 208, 213) } else { egui::Color32::from_rgb(52, 53, 58) }, ui::TEXT()));
+    p.circle_filled(egui::pos2(track.left() + 10.0 + 16.0 * k, track.center().y), 7.0, lerp(ui::DIM(), FIELD()));
     r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
@@ -64,11 +68,11 @@ impl App {
             .exact_size(WIDTH)
             .resizable(false)
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin { left: 18, right: 0, top: 18, bottom: 18 }))
+            .frame(egui::Frame::new().fill(ui::BG()).inner_margin(egui::Margin { left: 18, right: 0, top: 18, bottom: 18 }))
             .show(ui, |ui| {
                 egui::Frame::new()
-                    .fill(PANEL)
-                    .stroke(egui::Stroke::new(1.0, PANEL_EDGE))
+                    .fill(PANEL())
+                    .stroke(egui::Stroke::new(1.0, PANEL_EDGE()))
                     .corner_radius(26)
                     .inner_margin(egui::Margin::same(18))
                     .show(ui, |ui| {
@@ -89,7 +93,7 @@ impl App {
                         // 아래에서 위로 쌓는다: 맨 아래에 상태 줄, 그 위에 버튼, 입력창, 진행 표시. 남는 위쪽이 대화.
                         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                             self.reset_row(ui);
-                            ui.label(egui::RichText::new(self.status_line()).size(10.5).color(ui::FAINT));
+                            ui.label(egui::RichText::new(self.status_line()).size(10.5).color(ui::FAINT()));
                             ui.add_space(8.0);
                             self.buttons(ui, ctx);
                             ui.add_space(8.0);
@@ -102,7 +106,7 @@ impl App {
                             }
                             ui.add_space(8.0);
                             if let Some(e) = self.error.clone() {
-                                ui.label(egui::RichText::new(e).size(12.5).color(ui::RED));
+                                ui.label(egui::RichText::new(e).size(12.5).color(ui::RED()));
                                 ui.add_space(4.0);
                             }
                             self.progress(ui, ctx, talking);
@@ -121,17 +125,17 @@ impl App {
         let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
         let pulse = ((now * 2.4).sin() * 0.5 + 0.5) as f32;
         let dot = r.rect.left_center() + egui::vec2(8.0, 0.0);
-        p.circle_filled(dot, 4.0 + 3.0 * pulse, ui::ORANGE.gamma_multiply(0.25 * (1.0 - pulse)));
-        p.circle_filled(dot, 4.0, ui::ORANGE);
-        let tr = p.text(r.rect.left_center() + egui::vec2(22.0, 0.0), egui::Align2::LEFT_CENTER, "내 차례", ui::bold(15.0), ui::TEXT);
+        p.circle_filled(dot, 4.0 + 3.0 * pulse, ui::ORANGE().gamma_multiply(0.25 * (1.0 - pulse)));
+        p.circle_filled(dot, 4.0, ui::ORANGE());
+        let tr = p.text(r.rect.left_center() + egui::vec2(22.0, 0.0), egui::Align2::LEFT_CENTER, "내 차례", ui::bold(15.0), ui::TEXT());
         // 남은 일의 수. 지금 앞에 있는 것까지 센다.
-        p.text(egui::pos2(tr.right() + 10.0, tr.center().y), egui::Align2::LEFT_CENTER, format!("남은 {asks}건"), ui::bold(12.5), ui::ORANGE);
+        p.text(egui::pos2(tr.right() + 10.0, tr.center().y), egui::Align2::LEFT_CENTER, format!("남은 {asks}건"), ui::bold(12.5), ui::ORANGE());
         // 다른 일부터 보고 싶으면 넘긴다.
         if asks > 1 {
             let br = Rect::from_min_size(egui::pos2(r.rect.right() - 62.0, r.rect.top() + 2.0), egui::vec2(60.0, 26.0));
             let b = ui.interact(br, ui.scope_id().with("task-next"), egui::Sense::click());
-            p.rect_stroke(br, 13.0, egui::Stroke::new(1.0, if b.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
-            p.text(br.center(), egui::Align2::CENTER_CENTER, "다음 ›", ui::bold(12.0), if b.hovered() { ui::TEXT } else { ui::DIM });
+            p.rect_stroke(br, 13.0, egui::Stroke::new(1.0, if b.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+            p.text(br.center(), egui::Align2::CENTER_CENTER, "다음 ›", ui::bold(12.0), if b.hovered() { ui::TEXT() } else { ui::DIM() });
             if b.on_hover_text("이 일은 나중에 하고 다음 일부터 봅니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.next_task();
             }
@@ -139,36 +143,58 @@ impl App {
         ui.add_space(8.0);
         let rest = ui.available_rect_before_wrap();
         // 아래 대화 구역과의 경계선
-        ui.painter().hline(rest.x_range(), rest.bottom() + 6.0, egui::Stroke::new(1.0, PANEL_EDGE));
+        ui.painter().hline(rest.x_range(), rest.bottom() + 6.0, egui::Stroke::new(1.0, PANEL_EDGE()));
         self.view.task_rect = Some(rest);
         if self.view.task.is_none() {
             // 방금 한 답을 반영하는 중: 끝나면 다음 일이 이 자리로 온다.
-            ui.painter().text(rest.left_top() + egui::vec2(4.0, 10.0), egui::Align2::LEFT_TOP, "답을 반영하는 중입니다. 끝나면 다음 일이 옵니다.", ui::font(12.5), ui::FAINT);
+            ui.painter().text(rest.left_top() + egui::vec2(4.0, 10.0), egui::Align2::LEFT_TOP, "답을 반영하는 중입니다. 끝나면 다음 일이 옵니다.", ui::font(12.5), ui::FAINT());
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); // 점이 깜빡인다
     }
 
     /// 맨 아래의 초기화. 실수로 지우지 않게 두 번 눌러야 한다: 한 번 누르면 확인을 묻고, 6초 안에 다시 눌러야 지운다.
     fn reset_row(&mut self, ui: &mut egui::Ui) {
+        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
+        // 왼쪽 끝: 밝은 화면 / 어두운 화면
+        let t = Rect::from_min_size(r.rect.left_top(), egui::vec2(60.0, 20.0));
+        let tr = ui.interact(t, ui.scope_id().with("theme"), egui::Sense::click());
+        let label = if ui::is_light() { "어둡게" } else { "밝게" };
+        p.text(t.left_center(), egui::Align2::LEFT_CENTER, label, ui::font(11.0), if tr.hovered() { ui::TEXT() } else { ui::FAINT() });
+        if tr.on_hover_text("밝은 화면과 어두운 화면을 바꿉니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            crate::set_theme(ui.ctx(), !ui::is_light(), true);
+            self.titlebar_done = false;
+        }
+        // 그 옆: 대화 언어 (AI 의 대답과 받아쓰기)
+        let l = Rect::from_min_size(egui::pos2(t.right() + 4.0, r.rect.top()), egui::vec2(60.0, 20.0));
+        let lr = ui.interact(l, ui.scope_id().with("lang"), egui::Sense::click());
+        let label = if crate::sys::english() { "한국어" } else { "English" };
+        p.text(l.left_center(), egui::Align2::LEFT_CENTER, label, ui::font(11.0), if lr.hovered() { ui::TEXT() } else { ui::FAINT() });
+        if lr
+            .on_hover_text(if crate::sys::english() { "대화를 한국어로 바꿉니다" } else { "Talk in English: answers, cards and voice" })
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            crate::sys::set_english(!crate::sys::english(), true);
+        }
         if self.cfg.demo() {
+            ui.add_space(2.0);
             return;
         }
         let armed = self.reset_armed.map(|t| t.elapsed().as_secs() < 6).unwrap_or(false);
         if !armed {
             self.reset_armed = None;
         }
-        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
         if armed {
             // 왼쪽에 경고, 오른쪽에 두 버튼. 서로 겹치지 않게 경고 글은 버튼 왼쪽까지만 그린다.
             let yes = Rect::from_min_size(egui::pos2(r.rect.right() - 118.0, r.rect.top()), egui::vec2(66.0, 20.0));
             let no = Rect::from_min_size(egui::pos2(r.rect.right() - 46.0, r.rect.top()), egui::vec2(46.0, 20.0));
             let warn = p.with_clip_rect(Rect::from_min_max(r.rect.min, egui::pos2(yes.left() - 8.0, r.rect.bottom())));
-            warn.text(r.rect.left_center(), egui::Align2::LEFT_CENTER, "화면·대화·기억·기록을 전부 지웁니다", ui::bold(11.5), ui::RED);
+            warn.text(r.rect.left_center(), egui::Align2::LEFT_CENTER, "화면·대화·기억·기록을 전부 지웁니다", ui::bold(11.5), ui::RED());
             let y = ui.interact(yes, ui.scope_id().with("reset-yes"), egui::Sense::click());
             let n = ui.interact(no, ui.scope_id().with("reset-no"), egui::Sense::click());
-            p.rect_stroke(yes, 10.0, egui::Stroke::new(1.0, ui::RED), egui::StrokeKind::Inside);
-            p.text(yes.center(), egui::Align2::CENTER_CENTER, "지우기", ui::bold(11.5), ui::RED);
-            p.text(no.center(), egui::Align2::CENTER_CENTER, "취소", ui::bold(11.5), if n.hovered() { ui::TEXT } else { ui::DIM });
+            p.rect_stroke(yes, 10.0, egui::Stroke::new(1.0, ui::RED()), egui::StrokeKind::Inside);
+            p.text(yes.center(), egui::Align2::CENTER_CENTER, "지우기", ui::bold(11.5), ui::RED());
+            p.text(no.center(), egui::Align2::CENTER_CENTER, "취소", ui::bold(11.5), if n.hovered() { ui::TEXT() } else { ui::DIM() });
             if y.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.reset_armed = None;
                 self.reset_all();
@@ -179,7 +205,7 @@ impl App {
         } else {
             let b = Rect::from_min_size(egui::pos2(r.rect.right() - 46.0, r.rect.top()), egui::vec2(46.0, 20.0));
             let resp = ui.interact(b, ui.scope_id().with("reset"), egui::Sense::click());
-            p.text(b.right_center(), egui::Align2::RIGHT_CENTER, "초기화", ui::font(11.0), if resp.hovered() { ui::TEXT } else { ui::FAINT });
+            p.text(b.right_center(), egui::Align2::RIGHT_CENTER, "초기화", ui::font(11.0), if resp.hovered() { ui::TEXT() } else { ui::FAINT() });
             if resp.on_hover_text("화면, 대화, 기억, 기록을 전부 지우고 처음부터 시작합니다 (API 키와 설정은 남습니다)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.reset_armed = Some(std::time::Instant::now());
             }
@@ -196,7 +222,7 @@ impl App {
         }
         let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
         let label = if self.show_shelf { "← 대화로 돌아가기".to_string() } else { format!("보관된 주제 {n}개  ›") };
-        p.text(r.rect.left_center() + egui::vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, label, ui::bold(12.5), if r.hovered() { ui::TEXT } else { ui::DIM });
+        p.text(r.rect.left_center() + egui::vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, label, ui::bold(12.5), if r.hovered() { ui::TEXT() } else { ui::DIM() });
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             self.show_shelf = !self.show_shelf;
         }
@@ -210,17 +236,17 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink(false).max_height(ui.available_height()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(width);
-                ui.label(egui::RichText::new("보관된 주제 · 누르면 화면으로 다시 꺼냅니다").size(12.0).color(ui::FAINT));
+                ui.label(egui::RichText::new("보관된 주제 · 누르면 화면으로 다시 꺼냅니다").size(12.0).color(ui::FAINT()));
                 ui.add_space(8.0);
                 for s in self.board.shelf.iter().rev() {
                     let (r, p) = ui.allocate_painter(egui::vec2(width - 6.0, 46.0), egui::Sense::click());
-                    p.rect_filled(r.rect, 14.0, FIELD);
-                    p.rect_stroke(r.rect, 14.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+                    p.rect_filled(r.rect, 14.0, FIELD());
+                    p.rect_stroke(r.rect, 14.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
                     // 이름이 길어도 줄 밖으로 나가지 않게 이 줄 안에서만 그린다.
                     let inner = p.with_clip_rect(r.rect.shrink2(egui::vec2(12.0, 0.0)));
-                    inner.text(r.rect.left_top() + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, &s.topic.name, ui::bold(13.5), ui::TEXT);
+                    inner.text(r.rect.left_top() + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, &s.topic.name, ui::bold(13.5), ui::TEXT());
                     let titles: Vec<&str> = s.cards.iter().take(4).map(|c| c.title.as_str()).collect();
-                    inner.text(r.rect.left_top() + egui::vec2(14.0, 27.0), egui::Align2::LEFT_TOP, format!("카드 {}장 · {}", s.cards.len(), titles.join(", ")), ui::font(11.0), ui::FAINT);
+                    inner.text(r.rect.left_top() + egui::vec2(14.0, 27.0), egui::Align2::LEFT_TOP, format!("카드 {}장 · {}", s.cards.len(), titles.join(", ")), ui::font(11.0), ui::FAINT());
                     if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         back = Some(s.topic.id.clone());
                     }
@@ -247,17 +273,17 @@ impl App {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(width);
                 let mine = |ui: &mut egui::Ui, text: &str| {
-                    ui.label(egui::RichText::new(text).size(13.0).color(ui::DIM));
+                    ui.label(egui::RichText::new(text).size(13.0).color(ui::DIM()));
                 };
                 let yours = |ui: &mut egui::Ui, text: &str, strong: bool| {
-                    let t = egui::RichText::new(text).font(ui::bold(15.0)).color(if strong { ui::TEXT } else { ui::DIM });
+                    let t = egui::RichText::new(text).font(ui::bold(15.0)).color(if strong { ui::TEXT() } else { ui::DIM() });
                     ui.label(t);
                     ui.add_space(14.0);
                 };
                 let n = self.recent.len();
                 if n == 0 && !self.busy {
                     if self.board.say.is_empty() {
-                        ui.label(egui::RichText::new("무엇이든 말하세요.\n답은 오른쪽 화면에 카드로 나타납니다.").size(13.5).color(ui::FAINT));
+                        ui.label(egui::RichText::new("무엇이든 말하세요.\n답은 오른쪽 화면에 카드로 나타납니다.").size(13.5).color(ui::FAINT()));
                     } else {
                         yours(ui, &self.board.say.clone(), true);
                     }
@@ -284,10 +310,17 @@ impl App {
                         yours(ui, &text, true);
                     }
                 } else if let Some(c) = self.caption.clone() {
-                    yours(ui, &c, true);
+                    // 읽고 있는 문장이 방금 한 말과 같으면 두 번 보이지 않게 한다.
+                    if self.recent.last().map(|(_, a)| a.trim() != c.trim()).unwrap_or(true) {
+                        yours(ui, &c, true);
+                    }
+                }
+                if self.standby {
+                    ui.label(egui::RichText::new("기다리는 중 · 부르거나 하던 얘기로 돌아오면 다시 들어요").size(13.0).color(ui::FAINT()));
+                    ui.add_space(3.0);
                 }
                 for w in &waiting {
-                    ui.label(egui::RichText::new(format!("곧 전함 · {w}")).size(13.0).color(ui::FAINT));
+                    ui.label(egui::RichText::new(format!("곧 전함 · {w}")).size(13.0).color(ui::FAINT()));
                     ui.add_space(3.0);
                 }
             });
@@ -309,10 +342,10 @@ impl App {
             // 듣는 중: 들어오는 소리의 크기만큼 고리가 커진다.
             let level = self.mic.as_ref().map(|m| m.level()).unwrap_or(0.0);
             let size = (level * 60.0).clamp(0.0, 7.0);
-            p.circle_stroke(dot, 4.0 + size, egui::Stroke::new(1.3, ui::TEXT.gamma_multiply(0.6)));
-            p.circle_filled(dot, 3.0, ui::TEXT);
+            p.circle_stroke(dot, 4.0 + size, egui::Stroke::new(1.3, ui::TEXT().gamma_multiply(0.6)));
+            p.circle_filled(dot, 3.0, ui::TEXT());
             let text = if self.heard { "듣는 중 · 말이 끝나면 알아서 보냅니다" } else { "듣는 중 · 말씀하세요" };
-            p.with_clip_rect(r.rect).text(r.rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), ui::TEXT);
+            p.with_clip_rect(r.rect).text(r.rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), ui::TEXT());
             ctx.request_repaint();
             return;
         }
@@ -320,13 +353,13 @@ impl App {
             // 말하는 중: 목소리처럼 일렁이는 고리
             for (i, speed) in [5.3_f64, 7.9, 3.7].iter().enumerate() {
                 let wave = ((now * speed + i as f64 * 1.3).sin() * 0.5 + 0.5) as f32;
-                p.circle_stroke(dot, 3.5 + i as f32 * 2.0 + wave * 2.0, egui::Stroke::new(1.1, ui::TEXT.gamma_multiply(0.75 - i as f32 * 0.22)));
+                p.circle_stroke(dot, 3.5 + i as f32 * 2.0 + wave * 2.0, egui::Stroke::new(1.1, ui::TEXT().gamma_multiply(0.75 - i as f32 * 0.22)));
             }
-            p.circle_filled(dot, 3.0, ui::TEXT);
+            p.circle_filled(dot, 3.0, ui::TEXT());
         } else {
             let k = ui::ease_out_cubic((now * 0.9).fract() as f32);
-            p.circle_stroke(dot, 3.0 + 6.0 * k, egui::Stroke::new(1.2, ui::ORANGE.gamma_multiply(0.6 * (1.0 - k))));
-            p.circle_filled(dot, 3.0, ui::ORANGE);
+            p.circle_stroke(dot, 3.0 + 6.0 * k, egui::Stroke::new(1.2, ui::ORANGE().gamma_multiply(0.6 * (1.0 - k))));
+            p.circle_filled(dot, 3.0, ui::ORANGE());
         }
         let what = if !self.busy {
             if talking {
@@ -345,7 +378,19 @@ impl App {
                 None => "생각하는 중".to_string(),
             }
         } else {
-            "화면에 쓰는 중".to_string()
+            // 지금 쓰고 있는 카드와, 이번 턴에 그 카드에 넣은 항목 수
+            let last_card = self.turn_raw.lines().rev().find_map(|l| {
+                let mut w = l.split_whitespace();
+                matches!(w.next(), Some("card" | "set" | "add" | "upd" | "del")).then(|| w.next().unwrap_or("").to_string())
+            });
+            match last_card.and_then(|id| self.board.card(&id).map(|c| (id, c.title.clone()))) {
+                Some((id, title)) => {
+                    let n = self.turn_raw.lines().filter(|l| l.starts_with(&format!("add {id} ")) || l.starts_with(&format!("upd {id} "))).count();
+                    let title: String = title.chars().take(18).collect();
+                    if n > 0 { format!("'{title}' 쓰는 중 · {n}줄") } else { format!("'{title}' 쓰는 중") }
+                }
+                None => "화면에 쓰는 중".to_string(),
+            }
         };
         let text = if self.busy { format!("{what} · {}초", self.sent_at.elapsed().as_secs()) } else { what };
         // 멈춤: 도는 턴을 그만두게 한다. 글자는 이 버튼 왼쪽까지만 그려서 겹치지 않게 한다.
@@ -355,14 +400,14 @@ impl App {
             let b = Rect::from_min_size(egui::pos2(r.rect.right() - 50.0, r.rect.top()), egui::vec2(50.0, 22.0));
             right = b.left() - 8.0;
             let resp = ui.interact(b, ui.scope_id().with("stop-turn"), egui::Sense::click());
-            p.rect_stroke(b, 11.0, egui::Stroke::new(1.0, if resp.hovered() { ui::TEXT } else { FIELD_EDGE }), egui::StrokeKind::Inside);
-            p.text(b.center(), egui::Align2::CENTER_CENTER, if stopping { "멈추는 중" } else { "멈춤" }, ui::bold(if stopping { 10.5 } else { 11.5 }), if resp.hovered() { ui::TEXT } else { ui::DIM });
+            p.rect_stroke(b, 11.0, egui::Stroke::new(1.0, if resp.hovered() { ui::TEXT() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+            p.text(b.center(), egui::Align2::CENTER_CENTER, if stopping { "멈추는 중" } else { "멈춤" }, ui::bold(if stopping { 10.5 } else { 11.5 }), if resp.hovered() { ui::TEXT() } else { ui::DIM() });
             if resp.on_hover_text("지금 하는 일을 그만두게 합니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
         let clip = p.with_clip_rect(Rect::from_min_max(r.rect.min, egui::pos2(right, r.rect.bottom())));
-        clip.text(r.rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), ui::ORANGE);
+        clip.text(r.rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), ui::ORANGE());
         ctx.request_repaint();
     }
 
@@ -382,10 +427,10 @@ impl App {
                 let side = w.min(h);
                 let uv = Rect::from_min_max(egui::pos2((w - side) / 2.0 / w, (h - side) / 2.0 / h), egui::pos2((w + side) / 2.0 / w, (h + side) / 2.0 / h));
                 egui::Image::new((tex.id(), egui::vec2(56.0, 56.0))).uv(uv).corner_radius(12).paint_at(ui, r.rect);
-                p.rect_stroke(r.rect, 12.0, egui::Stroke::new(1.0, if r.hovered() { ui::TEXT } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+                p.rect_stroke(r.rect, 12.0, egui::Stroke::new(1.0, if r.hovered() { ui::TEXT() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
                 if r.hovered() {
                     p.rect_filled(r.rect, 12.0, egui::Color32::from_black_alpha(140));
-                    p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "빼기", ui::bold(12.0), ui::TEXT);
+                    p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "빼기", ui::bold(12.0), ui::TEXT());
                 }
                 if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     remove = Some(n);
@@ -400,8 +445,8 @@ impl App {
     fn input_box(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let now = ui.input(|i| i.time);
         let pill = egui::Frame::new()
-            .fill(FIELD)
-            .stroke(egui::Stroke::new(1.0, FIELD_EDGE))
+            .fill(FIELD())
+            .stroke(egui::Stroke::new(1.0, FIELD_EDGE()))
             .corner_radius(20)
             .inner_margin(egui::Margin::symmetric(16, 12))
             .show(ui, |ui| {
@@ -413,7 +458,7 @@ impl App {
                         // Enter 는 보내기, 줄을 바꾸려면 Shift+Enter
                         .return_key(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter))
                         .font(egui::FontId::proportional(15.0))
-                        .text_color(ui::TEXT)
+                        .text_color(ui::TEXT())
                         .frame(egui::Frame::NONE),
                 )
             });
@@ -445,9 +490,9 @@ impl App {
             // 기록: 오늘의 기록 노트를 옵시디언에서 연다 (옵시디언이 없으면 보관함 폴더를 연다).
             // 사진: 파일을 골라 붙인다 (붙여넣기와 끌어다 놓기도 된다).
             let (pr, pp) = ui.allocate_painter(egui::vec2(64.0, 40.0), egui::Sense::click());
-            pp.rect_filled(pr.rect, 20.0, FIELD);
-            pp.rect_stroke(pr.rect, 20.0, egui::Stroke::new(1.0, if pr.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
-            pp.text(pr.rect.center(), egui::Align2::CENTER_CENTER, "사진", ui::bold(13.0), if pr.hovered() { ui::TEXT } else { ui::DIM });
+            pp.rect_filled(pr.rect, 20.0, FIELD());
+            pp.rect_stroke(pr.rect, 20.0, egui::Stroke::new(1.0, if pr.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+            pp.text(pr.rect.center(), egui::Align2::CENTER_CENTER, "사진", ui::bold(13.0), if pr.hovered() { ui::TEXT() } else { ui::DIM() });
             if pr.on_hover_text("사진 파일을 골라 붙입니다 · 캡처한 그림은 Ctrl+V 로 바로 붙습니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 let picked = rfd::FileDialog::new().add_filter("사진", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]).pick_files().unwrap_or_default();
                 for path in picked {
@@ -455,9 +500,9 @@ impl App {
                 }
             }
             let (nr, np) = ui.allocate_painter(egui::vec2(64.0, 40.0), egui::Sense::click());
-            np.rect_filled(nr.rect, 20.0, FIELD);
-            np.rect_stroke(nr.rect, 20.0, egui::Stroke::new(1.0, if nr.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
-            np.text(nr.rect.center(), egui::Align2::CENTER_CENTER, "기록", ui::bold(13.0), if nr.hovered() { ui::TEXT } else { ui::DIM });
+            np.rect_filled(nr.rect, 20.0, FIELD());
+            np.rect_stroke(nr.rect, 20.0, egui::Stroke::new(1.0, if nr.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+            np.text(nr.rect.center(), egui::Align2::CENTER_CENTER, "기록", ui::bold(13.0), if nr.hovered() { ui::TEXT() } else { ui::DIM() });
             if nr.on_hover_text("오늘의 기록과 기억 보관함 열기").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 let (date, _) = sys::now_local();
                 let today = vault::root().join("기록").join(format!("{date}.md"));
@@ -497,14 +542,14 @@ impl App {
     /// 처음 쓰는 사람을 위한 화면: API 키를 넣으면 프로그램 폴더에 저장하고 바로 시작한다.
     fn key_setup(&mut self, ui: &mut egui::Ui) {
         let field = |ui: &mut egui::Ui, value: &mut String, hint: &str| {
-            egui::Frame::new().fill(FIELD).stroke(egui::Stroke::new(1.0, FIELD_EDGE)).corner_radius(14).inner_margin(egui::Margin::symmetric(14, 9)).show(ui, |ui| {
+            egui::Frame::new().fill(FIELD()).stroke(egui::Stroke::new(1.0, FIELD_EDGE())).corner_radius(14).inner_margin(egui::Margin::symmetric(14, 9)).show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::singleline(value)
                         .password(true)
                         .hint_text(hint)
                         .desired_width(f32::INFINITY)
                         .font(egui::FontId::proportional(13.5))
-                        .text_color(ui::TEXT)
+                        .text_color(ui::TEXT())
                         .frame(egui::Frame::NONE),
                 )
             });
@@ -512,8 +557,8 @@ impl App {
         // 아래에서 위로 쌓이므로 버튼이 먼저 온다.
         let ready = self.key_input.trim().len() > 20;
         let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
-        p.rect_filled(r.rect, 20.0, if ready { ui::TEXT } else { FIELD });
-        p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "저장하고 시작", ui::bold(13.5), if ready { PANEL } else { ui::FAINT });
+        p.rect_filled(r.rect, 20.0, if ready { ui::TEXT() } else { FIELD() });
+        p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "저장하고 시작", ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
         if ready && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             let base = sys::base_dir();
             let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
@@ -533,7 +578,7 @@ impl App {
         ui.label(
             egui::RichText::new("처음이시군요. 본인의 Claude API 키를 넣어 주세요.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고 다른 곳으로 보내지지 않습니다.")
                 .size(12.5)
-                .color(ui::DIM),
+                .color(ui::DIM()),
         );
     }
 }

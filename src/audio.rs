@@ -169,6 +169,16 @@ impl Mic {
         f32::from_bits(self.level.load(Ordering::SeqCst))
     }
 
+    /// 모은 소리 가운데 마지막 `secs` 초만 남긴다 (그 앞은 버린다).
+    pub fn keep_last(&self, secs: f32) {
+        let n = (self.rate.load(Ordering::SeqCst) as f32 * secs) as usize;
+        let mut s = self.samples.lock().unwrap();
+        if s.len() > n {
+            let cut = s.len() - n;
+            s.drain(..cut);
+        }
+    }
+
     pub fn error(&self) -> Option<String> {
         self.failed.lock().unwrap().clone()
     }

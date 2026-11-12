@@ -114,10 +114,11 @@ pub fn before(input: &str, topics: &[(String, String)], notes: &[(String, String
         ),
     );
     // 일을 시킨 것이면 답이 오기 전에 먼저 대답할 말을 정한다 (음성 대화에서 쓴다).
+    let en = crate::sys::english();
     pre.ack = match pre.kind.as_deref() {
-        Some("작업") => Some("네, 바로 해볼게요.".to_string()),
-        Some("화면 수정") => Some("네, 고칠게요.".to_string()),
-        Some("기억 찾기") => Some("잠깐만요, 찾아볼게요.".to_string()),
+        Some("작업") => Some(if en { "Sure, on it." } else { "네, 바로 해볼게요." }.to_string()),
+        Some("화면 수정") => Some(if en { "Okay, updating." } else { "네, 고칠게요." }.to_string()),
+        Some("기억 찾기") => Some(if en { "One moment, let me look." } else { "잠깐만요, 찾아볼게요." }.to_string()),
         _ => None,
     };
     Some(pre)
@@ -336,4 +337,16 @@ pub fn relevant(input: &str, recent: &str, cands: &[(f32, usize, String)]) -> Ve
     scored.truncate(MAX);
     scored.sort_by_key(|(_, c)| c.1);
     scored.into_iter().map(|(_, c)| c.2.clone()).collect()
+}
+
+/// 기다리는 중에 들린 말이 비서를 부르거나 비서에게 하는 말인지 판단한다 (혼잣말, 읽는 소리, 다른 사람과의 대화가 아닌지).
+/// 판단하지 못하면 부르지 않은 것으로 본다 (기다려 달라고 했으므로 조용히 있는 쪽이 낫다).
+pub fn addressed(key: &str, context: &str, asides: &str, text: &str) -> bool {
+    const SYSTEM: &str = "너는 음성 비서가 대답해야 할지 판단한다. 사용자는 비서에게 잠깐 기다리라고 해 두고 다른 일(뭔가 읽기, 확인하기, 다른 사람과 얘기하기, 혼잣말)을 하는 중이다. 이때 마이크에 들린 말 하나를 받는다.\n- 비서를 부르거나, 비서에게 묻거나 시키는 말이거나, 기다리기 전의 대화로 돌아와 이어 가는 말이면 `예`.\n- 혼잣말, 무언가를 소리 내어 읽는 것, 다른 사람에게 하는 말, 비서와 상관없는 말이면 `아니오`.\n애매하면 `아니오`. `예` 또는 `아니오` 한 단어만 출력한다.";
+    let user = format!("<기다리기 전 대화>\n{context}</기다리기 전 대화>\n<기다리는 동안 앞서 들린 말>{asides}</기다리는 동안 앞서 들린 말>\n<이번에 들린 말>{text}</이번에 들린 말>");
+    let model = std::env::var("LYBOARD_WAKE_MODEL").unwrap_or_else(|_| "claude-haiku-5-5".into());
+    let t0 = std::time::Instant::now();
+    let answer = crate::agent::ask(key, &model, SYSTEM, &user, 10);
+    crate::sys::log("stt.log", &format!("부름 판단 {}ms: {:?} <- {text}", t0.elapsed().as_millis(), answer));
+    matches!(answer, Ok(a) if a.trim().starts_with('예'))
 }

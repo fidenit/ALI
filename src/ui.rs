@@ -21,18 +21,53 @@ const HEAD: f32 = 46.0;
 const PAD: f32 = 22.0;
 const RADIUS: u8 = 20;
 
-pub const BG: Color32 = Color32::from_rgb(16, 17, 19);
-const CARD: Color32 = Color32::from_rgb(28, 29, 32); // #1C1D20
-const RAISED: Color32 = Color32::from_rgb(41, 42, 46);
-const BORDER: Color32 = Color32::from_rgb(50, 51, 56);
-const EDGE: Color32 = Color32::from_rgb(104, 105, 111);
-pub const TEXT: Color32 = Color32::from_rgb(218, 219, 223);
-const SOFT: Color32 = Color32::from_rgb(184, 185, 190);
-pub const DIM: Color32 = Color32::from_rgb(138, 139, 145);
-pub const FAINT: Color32 = Color32::from_rgb(88, 89, 95);
-const GREEN: Color32 = Color32::from_rgb(142, 198, 162);
-const AMBER: Color32 = Color32::from_rgb(216, 186, 130);
-pub const RED: Color32 = Color32::from_rgb(222, 134, 128);
+/// 밝은 화면인가. 처음에는 OS 설정을 따르고, 사용자가 바꾸면 data/theme.txt 에 남는다.
+static LIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_light(on: bool) {
+    LIGHT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_light() -> bool {
+    LIGHT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// (어두울 때, 밝을 때)
+const fn pick(dark: (u8, u8, u8), light: (u8, u8, u8)) -> [Color32; 2] {
+    [Color32::from_rgb(dark.0, dark.1, dark.2), Color32::from_rgb(light.0, light.1, light.2)]
+}
+
+macro_rules! palette {
+    ($($(#[$m:meta])* $vis:vis $name:ident = $dark:expr, $light:expr;)*) => {
+        $(
+            $(#[$m])*
+            #[allow(non_snake_case)]
+            $vis fn $name() -> Color32 {
+                const C: [Color32; 2] = pick($dark, $light);
+                C[is_light() as usize]
+            }
+        )*
+    };
+}
+
+palette! {
+    pub BG = (16, 17, 19), (243, 243, 241);
+    CARD = (28, 29, 32), (255, 255, 255);
+    RAISED = (41, 42, 46), (236, 236, 238);
+    BORDER = (50, 51, 56), (221, 221, 225);
+    EDGE = (104, 105, 111), (150, 151, 158);
+    pub TEXT = (218, 219, 223), (26, 27, 30);
+    SOFT = (184, 185, 190), (64, 65, 71);
+    pub DIM = (138, 139, 145), (108, 109, 116);
+    pub FAINT = (88, 89, 95), (160, 161, 168);
+    GREEN = (142, 198, 162), (34, 135, 80);
+    AMBER = (216, 186, 130), (168, 112, 20);
+    pub RED = (222, 134, 128), (196, 64, 56);
+    pub ZONE = (21, 22, 25), (234, 234, 236);
+    pub ZONE_EDGE = (33, 34, 38), (220, 220, 224);
+    pub ORANGE = (255, 150, 50), (232, 116, 12);
+}
+
 
 // 전환 시간 (초)
 const T_MOVE: f64 = 0.42;
@@ -187,8 +222,6 @@ pub struct WebSlot {
     pub visible: bool,
 }
 
-const ZONE: Color32 = Color32::from_rgb(21, 22, 25);
-const ZONE_EDGE: Color32 = Color32::from_rgb(33, 34, 38);
 
 /// 카드가 실제로 차지할 세로 칸 수. 내용이 짧으면 줄어든다 (사용자가 크기를 정한 카드는 그대로).
 fn eff_h(c: &Card, view: &View) -> i32 {
@@ -327,7 +360,6 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
 const INBOX_COLS: i32 = 3;
 const INBOX_ID: &str = "\u{1}inbox";
 
-pub const ORANGE: Color32 = Color32::from_rgb(255, 150, 50);
 
 /// 이름 붙은 숫자 하나를 목표값으로 이징한다. 반환값은 (현재 값, 아직 움직이는 중인가).
 fn tween_num(map: &mut HashMap<String, (f32, f32, f64)>, key: &str, target: f32, now: f64, dur: f64) -> (f32, bool) {
@@ -381,7 +413,7 @@ pub fn draw_runner(p: &Painter, rect: Rect, rad: f32, now: f64, k: f32) {
     let r = rect.shrink(0.75);
     let rad = rad - 0.75;
     let total = 2.0 * (r.width() + r.height() - 4.0 * rad) + std::f32::consts::TAU * rad;
-    p.rect_stroke(rect, rad, Stroke::new(1.0, ORANGE.gamma_multiply(0.22 * k)), StrokeKind::Inside);
+    p.rect_stroke(rect, rad, Stroke::new(1.0, ORANGE().gamma_multiply(0.22 * k)), StrokeKind::Inside);
     let head = ((now / 1.7).fract() as f32) * total;
     let len = total * 0.3;
     let n = 44;
@@ -390,10 +422,10 @@ pub fn draw_runner(p: &Painter, rect: Rect, rad: f32, now: f64, k: f32) {
         let alpha = b * b * k;
         p.line_segment(
             [perimeter_point(r, rad, head - len + len * a), perimeter_point(r, rad, head - len + len * b)],
-            Stroke::new(2.0, ORANGE.gamma_multiply(alpha)),
+            Stroke::new(2.0, ORANGE().gamma_multiply(alpha)),
         );
     }
-    p.circle_filled(perimeter_point(r, rad, head), 2.2, ORANGE.gamma_multiply(k));
+    p.circle_filled(perimeter_point(r, rad, head), 2.2, ORANGE().gamma_multiply(k));
 }
 
 /// 본문을 그릴 때 필요한 것들.
@@ -741,12 +773,12 @@ pub fn board(
                 offset: [0, if lifted { 14 } else { 6 }],
                 blur: if lifted { 36 } else { 22 },
                 spread: 0,
-                color: Color32::from_black_alpha(if lifted { 130 } else { 70 }),
+                color: Color32::from_black_alpha(match (is_light(), lifted) { (true, true) => 45, (true, false) => 18, (false, true) => 130, (false, false) => 70 }),
             };
             p.add(shadow.as_shape(rect, radius));
-            p.rect_filled(rect, radius, if lifted { mix(CARD, RAISED, 0.5) } else { CARD });
-            let rest = if is_sel { TEXT } else if is_focus { EDGE } else { BORDER };
-            p.rect_stroke(rect, radius, Stroke::new(if is_sel { 1.5 } else { 1.0 }, mix(rest, TEXT, flash * 0.55)), StrokeKind::Inside);
+            p.rect_filled(rect, radius, if lifted { mix(CARD(), RAISED(), 0.5) } else { CARD() });
+            let rest = if is_sel { TEXT() } else if is_focus { EDGE() } else { BORDER() };
+            p.rect_stroke(rect, radius, Stroke::new(if is_sel { 1.5 } else { 1.0 }, mix(rest, TEXT(), flash * 0.55)), StrokeKind::Inside);
 
             // 사용자가 이 카드를 조작했고 AI 가 아직 반응하는 중이면 테두리에 주황색 선이 돈다.
             let (pk, pbusy) = tween_num(&mut v.nums, "pend", if pending.contains(&c.id) { 1.0 } else { 0.0 }, now, 0.3);
@@ -758,7 +790,7 @@ pub fn board(
             // 제목 오른쪽에 붙는 것(주제 이름, 완료 개수, 고정 표시)의 폭만큼 제목 자리를 줄여서 글자가 겹치지 않게 한다.
             let topic_label = if sticky_pass { board.topics.iter().find(|t| t.id == c.topic).map(|t| t.name.clone()).unwrap_or_default() } else { String::new() };
             let reserved = if !topic_label.is_empty() {
-                p.layout_no_wrap(topic_label.clone(), font(11.0), DIM).size().x + 14.0
+                p.layout_no_wrap(topic_label.clone(), font(11.0), DIM()).size().x + 14.0
             } else if c.kind == Kind::Checklist && !c.items.is_empty() {
                 64.0
             } else {
@@ -768,14 +800,14 @@ pub fn board(
             let side_clip = Rect::from_min_max(rect.min, pos2(rect.right() - 6.0, rect.top() + HEAD));
             let mut tp = p.with_clip_rect(title_clip.intersect(p.clip_rect()));
             tp.set_opacity(alpha * title_a);
-            tp.text(rect.min + vec2(PAD, 15.0), Align2::LEFT_TOP, &c.title, bold(16.0), TEXT);
+            tp.text(rect.min + vec2(PAD, 15.0), Align2::LEFT_TOP, &c.title, bold(16.0), TEXT());
             // 제목 옆에 붙는 것들은 제목과 다른 자리에 그린다.
             let mut sp = p.with_clip_rect(side_clip.intersect(p.clip_rect()));
             sp.set_opacity(alpha * title_a);
             // "내 차례" 구역의 카드는 주제 구역 밖에 있으므로, 어느 주제의 질문인지 제목 옆에 적는다.
             if sticky_pass {
                 let topic = board.topics.iter().find(|t| t.id == c.topic).map(|t| t.name.as_str()).unwrap_or("");
-                sp.text(pos2(rect.right() - if c.pinned { 34.0 } else { PAD }, rect.top() + 19.0), Align2::RIGHT_TOP, topic, font(11.0), ORANGE.gamma_multiply(0.85));
+                sp.text(pos2(rect.right() - if c.pinned { 34.0 } else { PAD }, rect.top() + 19.0), Align2::RIGHT_TOP, topic, font(11.0), ORANGE().gamma_multiply(0.85));
             }
             let right_x = rect.right() - if c.pinned { 34.0 } else { PAD };
             if c.kind == Kind::Checklist && !c.items.is_empty() {
@@ -793,9 +825,9 @@ pub fn board(
                 }
                 let frac = e.0 + (e.1 - e.0) * ease_out_cubic(k);
                 let all = done == total;
-                let col = if all { GREEN } else { SOFT };
+                let col = if all { GREEN() } else { SOFT() };
                 let center = pos2(right_x - 8.0, rect.top() + 24.0);
-                sp.circle_stroke(center, 7.0, Stroke::new(2.0, RAISED));
+                sp.circle_stroke(center, 7.0, Stroke::new(2.0, RAISED()));
                 let n = 40;
                 let pts: Vec<Pos2> = (0..=((n as f32 * frac) as usize))
                     .map(|i| {
@@ -806,15 +838,15 @@ pub fn board(
                 if pts.len() > 1 {
                     sp.line(pts, Stroke::new(2.0, col));
                 }
-                sp.text(pos2(right_x - 22.0, rect.top() + 24.0), Align2::RIGHT_CENTER, format!("{done}/{total}"), bold(12.5), if all { GREEN } else { DIM });
+                sp.text(pos2(right_x - 22.0, rect.top() + 24.0), Align2::RIGHT_CENTER, format!("{done}/{total}"), bold(12.5), if all { GREEN() } else { DIM() });
             }
             if c.pinned {
-                p.circle_filled(pos2(rect.right() - 20.0, rect.top() + 25.0), 3.0, DIM);
+                p.circle_filled(pos2(rect.right() - 20.0, rect.top() + 25.0), 3.0, DIM());
             }
             if hovered || lifted {
                 let m = rect.max - vec2(9.0, 9.0);
                 for d in [4.0, 8.0] {
-                    p.line_segment([m - vec2(d, 0.0), m - vec2(0.0, d)], Stroke::new(1.0, FAINT));
+                    p.line_segment([m - vec2(d, 0.0), m - vec2(0.0, d)], Stroke::new(1.0, FAINT()));
                 }
             }
 
@@ -854,7 +886,7 @@ pub fn board(
                     if numeric {
                         buf.retain(|ch| ch.is_ascii_digit() || ".,-".contains(ch));
                     }
-                    let edit = egui::TextEdit::singleline(buf).frame(egui::Frame::NONE).hint_text(hint).font(font(14.0)).text_color(TEXT).desired_width(r.width());
+                    let edit = egui::TextEdit::singleline(buf).frame(egui::Frame::NONE).hint_text(hint).font(font(14.0)).text_color(TEXT()).desired_width(r.width());
                     let resp = ui.put(r, edit);
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         submit = true;
@@ -869,7 +901,7 @@ pub fn board(
                 if used > body.height() + 3.0 {
                     // 내용이 카드보다 길다는 표시
                     for i in 0..3 {
-                        p.circle_filled(pos2(rect.center().x - 6.0 + i as f32 * 6.0, rect.bottom() - 8.0), 1.3, DIM);
+                        p.circle_filled(pos2(rect.center().x - 6.0 + i as f32 * 6.0, rect.bottom() - 8.0), 1.3, DIM());
                     }
                 }
             }
@@ -893,29 +925,29 @@ pub fn board(
                 if r.name.is_empty() {
                     continue;
                 }
-                base.rect_filled(r.rect, 44.0, mix(BG, ZONE, 0.35 + 0.65 * far));
-                base.rect_stroke(r.rect, 44.0, Stroke::new((1.0 / zoom).min(8.0), mix(ZONE_EDGE, EDGE, far * 0.6)), StrokeKind::Inside);
+                base.rect_filled(r.rect, 44.0, mix(BG(), ZONE(), 0.35 + 0.65 * far));
+                base.rect_stroke(r.rect, 44.0, Stroke::new((1.0 / zoom).min(8.0), mix(ZONE_EDGE(), EDGE(), far * 0.6)), StrokeKind::Inside);
                 // 이 분류 안에서 내 답을 기다리는 수: 영역 위 오른쪽 끝
                 let rad = (13.0 / zoom).clamp(13.0, REGION_GAP * 0.3);
                 let badge = if r.asks > 0 { rad * 2.0 + 12.0 / zoom } else { 0.0 };
                 if r.asks > 0 {
                     let c = pos2(r.rect.right() - rad - 8.0, r.rect.top() - rad - 6.0 / zoom);
-                    base.circle_filled(c, rad, ORANGE);
-                    base.text(c, Align2::CENTER_CENTER, format!("{}", r.asks), bold(rad * 1.1), CARD);
+                    base.circle_filled(c, rad, ORANGE());
+                    base.text(c, Align2::CENTER_CENTER, format!("{}", r.asks), bold(rad * 1.1), CARD());
                 }
                 if far < 0.55 {
                     // 가까이·중간: 영역 위 왼쪽에 이름 (화면에서 늘 같은 크기로 보이게 확대 비율만큼 키운다)
                     let size = fit(&r.name, r.rect.width() - badge - 16.0, (24.0 / zoom).min(REGION_GAP * 0.6));
                     let mut lp = base.clone();
                     lp.set_opacity((1.0 - far * 1.8).max(0.0)); // 가운데 이름이 나타나기 전에 먼저 사라진다
-                    lp.text(pos2(r.rect.left() + 8.0, r.rect.top() - 6.0 / zoom), Align2::LEFT_BOTTOM, &r.name, bold(size), SOFT);
+                    lp.text(pos2(r.rect.left() + 8.0, r.rect.top() - 6.0 / zoom), Align2::LEFT_BOTTOM, &r.name, bold(size), SOFT());
                 }
                 if far > 0.45 {
                     // 멀리: 영역 한가운데에 이름을 크게. 이때 주제 이름은 보이지 않는다.
                     let size = fit(&r.name, r.rect.width() * 0.8, (30.0 / zoom).min(r.rect.height() * 0.35));
                     let mut lp = base.clone();
                     lp.set_opacity((far * 1.8 - 0.8).max(0.0));
-                    lp.text(r.rect.center(), Align2::CENTER_CENTER, &r.name, bold(size), TEXT);
+                    lp.text(r.rect.center(), Align2::CENTER_CENTER, &r.name, bold(size), TEXT());
                 }
             }
             // 주제 구역: 이름이 붙은 바탕 판. 카드는 자기 주제의 판 위에만 놓인다.
@@ -933,11 +965,11 @@ pub fn board(
                 // 분류 이름만 보이는 단계에서는 주제 판이 옅은 덩어리로만 남는다.
                 let grouped = !regions.is_empty();
                 zp.set_opacity(appear * if grouped { 1.0 - far * 0.75 } else { 1.0 });
-                zp.rect_filled(r, 26.0, mix(ZONE, RAISED, (1.0 - cards_seen) * 0.6));
-                zp.rect_stroke(r, 26.0, Stroke::new((1.0 / zoom).min(5.0), ZONE_EDGE), StrokeKind::Inside);
+                zp.rect_filled(r, 26.0, mix(ZONE(), RAISED(), (1.0 - cards_seen) * 0.6));
+                zp.rect_stroke(r, 26.0, Stroke::new((1.0 / zoom).min(5.0), ZONE_EDGE()), StrokeKind::Inside);
                 // 지금 사용자 앞에 가져온 일이 속한 구역: 주황색 테두리로 "이 일의 자리"임을 보인다.
                 if task_topic.as_deref() == Some(z.id.as_str()) {
-                    zp.rect_stroke(r, 26.0, Stroke::new((1.5 / zoom).min(7.0), ORANGE.gamma_multiply(0.75)), StrokeKind::Inside);
+                    zp.rect_stroke(r, 26.0, Stroke::new((1.5 / zoom).min(7.0), ORANGE().gamma_multiply(0.75)), StrokeKind::Inside);
                 }
                 let count = board.cards.iter().filter(|c| c.topic == z.id && task_id.as_deref() != Some(c.id.as_str())).count();
                 if cards_seen > 0.02 {
@@ -946,8 +978,8 @@ pub fn board(
                     np.set_opacity(appear * cards_seen);
                     // 조금 축소된 상태에서도 읽히게, 구역 머리 높이 안에서 글자를 키운다.
                     let name_size = (15.0 / zoom).clamp(15.0, 24.0);
-                    let tr = np.text(r.min + vec2(ZONE_PAD + 8.0, (ZONE_HEAD - name_size) * 0.5 - 2.0), Align2::LEFT_TOP, &z.name, bold(name_size), SOFT);
-                    np.text(pos2(tr.right() + 10.0, tr.center().y), Align2::LEFT_CENTER, format!("{count}"), font(12.0), FAINT);
+                    let tr = np.text(r.min + vec2(ZONE_PAD + 8.0, (ZONE_HEAD - name_size) * 0.5 - 2.0), Align2::LEFT_TOP, &z.name, bold(name_size), SOFT());
+                    np.text(pos2(tr.right() + 10.0, tr.center().y), Align2::LEFT_CENTER, format!("{count}"), font(12.0), FAINT());
                 }
                 let mid_here = if grouped { mid } else { 1.0 - cards_seen };
                 if mid_here > 0.02 {
@@ -955,7 +987,7 @@ pub fn board(
                     let size = fit(&z.name, r.width() - 24.0, (16.0 / zoom).min(r.height() * 0.4));
                     let mut np = zp.with_clip_rect(r.shrink(6.0).intersect(zp.clip_rect()));
                     np.set_opacity(appear * mid_here);
-                    np.text(r.center(), Align2::CENTER_CENTER, &z.name, bold(size), TEXT);
+                    np.text(r.center(), Align2::CENTER_CENTER, &z.name, bold(size), TEXT());
                 }
                 // 방금 한 말이 이 주제의 이야기라고 판단되면, 답이 오기 전부터 이 구역 테두리에 선이 돈다.
                 if hot_zone == Some(z.id.as_str()) {
@@ -1019,7 +1051,7 @@ pub fn board(
         }
 
         if board.cards.is_empty() {
-            ui.painter().text(area.center(), Align2::CENTER_CENTER, "왼쪽에 말을 걸어 보세요", bold(20.0), FAINT);
+            ui.painter().text(area.center(), Align2::CENTER_CENTER, "왼쪽에 말을 걸어 보세요", bold(20.0), FAINT());
         }
     }
     moving
@@ -1131,11 +1163,11 @@ fn check_mark(p: &Painter, c: Pos2, color: Color32) {
 
 fn state_color(s: &str) -> Color32 {
     match s {
-        "ok" | "done" => GREEN,
-        "run" => TEXT,
-        "wait" => AMBER,
-        "fail" => RED,
-        _ => FAINT,
+        "ok" | "done" => GREEN(),
+        "run" => TEXT(),
+        "wait" => AMBER(),
+        "fail" => RED(),
+        _ => FAINT(),
     }
 }
 
@@ -1144,7 +1176,7 @@ fn state_dot(p: &Painter, c: Pos2, state: &str, now: f64, moving: &mut bool) {
     match state {
         "done" | "ok" => {
             p.circle_filled(c, 7.0, col);
-            check_mark(p, c, CARD);
+            check_mark(p, c, CARD());
         }
         "run" => {
             // 숨 쉬듯 퍼졌다 사라지는 고리
@@ -1156,7 +1188,7 @@ fn state_dot(p: &Painter, c: Pos2, state: &str, now: f64, moving: &mut bool) {
         }
         "fail" => {
             p.circle_filled(c, 7.0, col);
-            let s = Stroke::new(1.7, CARD);
+            let s = Stroke::new(1.7, CARD());
             p.line_segment([c + vec2(-2.8, -2.8), c + vec2(2.8, 2.8)], s);
             p.line_segment([c + vec2(-2.8, 2.8), c + vec2(2.8, -2.8)], s);
         }
@@ -1241,18 +1273,18 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
     let (x, top, w) = (body.left(), body.top(), body.width());
     let now = cx.now;
     match c.kind {
-        Kind::Note => wrapped(p, body.min, w, c.field("text"), 15.0, SOFT),
+        Kind::Note => wrapped(p, body.min, w, c.field("text"), 15.0, SOFT()),
 
         Kind::Web => {
             // 이 자리 위에 실제 브라우저 화면이 올라간다. 여기서는 자리와 주소만 알려 준다.
             let url = c.field("url").to_string();
-            p.rect_filled(body, 10.0, RAISED);
+            p.rect_filled(body, 10.0, RAISED());
             if url.is_empty() {
-                p.text(body.center(), Align2::CENTER_CENTER, "주소가 아직 없습니다", font(12.0), FAINT);
+                p.text(body.center(), Align2::CENTER_CENTER, "주소가 아직 없습니다", font(12.0), FAINT());
             } else {
                 // 페이지는 제 크기(100%)로 화면 안에 다 들어와야 보인다. 그렇지 않을 때는 누르면 그렇게 보이는 자리로 간다.
-                p.text(body.center() - vec2(0.0, 10.0), Align2::CENTER_CENTER, "눌러서 페이지 보기", bold(14.0), SOFT);
-                p.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, "페이지는 카드가 제 크기로 화면에 다 들어와야 보입니다", font(11.5), FAINT);
+                p.text(body.center() - vec2(0.0, 10.0), Align2::CENTER_CENTER, "눌러서 페이지 보기", bold(14.0), SOFT());
+                p.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, "페이지는 카드가 제 크기로 화면에 다 들어와야 보입니다", font(11.5), FAINT());
                 if cx.ui.interact(body, cx.id.with("web-show"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     cx.lines.push(format!("@show {}", c.id));
                 }
@@ -1275,27 +1307,27 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             };
             state_dot(p, pos2(x + 8.0, top + 12.0), state, now, cx.moving);
             p.text(pos2(x + 26.0, top - 1.0), Align2::LEFT_TOP, label, bold(18.0), state_color(state));
-            let h = wrapped(p, pos2(x, top + 26.0), w, c.field("text"), 12.5, DIM);
+            let h = wrapped(p, pos2(x, top + 26.0), w, c.field("text"), 12.5, DIM());
             26.0 + h
         }
 
         Kind::Metric => {
-            let r = p.text(pos2(x, top - 8.0), Align2::LEFT_TOP, c.field("value"), bold(46.0), TEXT);
-            p.text(pos2(r.right() + 8.0, r.bottom() - 13.0), Align2::LEFT_BOTTOM, c.field("unit"), bold(12.0), DIM);
+            let r = p.text(pos2(x, top - 8.0), Align2::LEFT_TOP, c.field("value"), bold(46.0), TEXT());
+            p.text(pos2(r.right() + 8.0, r.bottom() - 13.0), Align2::LEFT_BOTTOM, c.field("unit"), bold(12.0), DIM());
             let mut y = r.bottom() + 2.0;
             let delta = c.field("delta");
             if !delta.is_empty() {
                 let col = if delta.starts_with('-') {
-                    RED
+                    RED()
                 } else if delta.starts_with('+') {
-                    GREEN
+                    GREEN()
                 } else {
-                    DIM
+                    DIM()
                 };
                 p.text(pos2(x, y), Align2::LEFT_TOP, delta, bold(13.0), col);
                 y += 21.0;
             }
-            y += wrapped(p, pos2(x, y), w, c.field("text"), 12.5, DIM);
+            y += wrapped(p, pos2(x, y), w, c.field("text"), 12.5, DIM());
             y - top
         }
 
@@ -1320,7 +1352,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let n = vals.len();
                 let px = |i: usize| if n == 1 { plot.center().x } else { plot.left() + plot.width() * i as f32 / (n - 1) as f32 };
                 let pts: Vec<Pos2> = vals.iter().enumerate().map(|(i, v)| pos2(px(i), plot.bottom() - plot.height() * (v - lo) / span)).collect();
-                p.line_segment([plot.left_bottom(), plot.right_bottom()], Stroke::new(1.0, BORDER));
+                p.line_segment([plot.left_bottom(), plot.right_bottom()], Stroke::new(1.0, BORDER()));
                 // 왼쪽에서부터 그려져 나간다.
                 let upto = (n as f32 - 1.0) * k;
                 let mut drawn: Vec<Pos2> = pts.iter().take(upto.floor() as usize + 1).copied().collect();
@@ -1329,20 +1361,20 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     drawn.push(pts[i].lerp(pts[i + 1], upto.fract()));
                 }
                 if drawn.len() >= 2 {
-                    p.add(egui::Shape::line(drawn, Stroke::new(2.2, SOFT)));
+                    p.add(egui::Shape::line(drawn, Stroke::new(2.2, SOFT())));
                 }
                 let slot = if n > 1 { plot.width() / (n - 1) as f32 } else { plot.width() };
                 let peak = vals.iter().cloned().fold(f32::MIN, f32::max);
                 for (i, (item, cells)) in c.items.iter().enumerate() {
                     let (rp, _) = cx.row(p, item);
                     let top_one = vals[i] == peak;
-                    rp.circle_filled(pts[i], if top_one { 4.5 } else { 3.2 }, if top_one { ORANGE } else { TEXT });
+                    rp.circle_filled(pts[i], if top_one { 4.5 } else { 3.2 }, if top_one { ORANGE() } else { TEXT() });
                     // 이름과 값은 자기 칸 폭 안에서만 그려서 옆의 것과 겹치지 않게 한다.
                     let cell = Rect::from_center_size(pos2(pts[i].x, plot.center().y), vec2((slot - 4.0).max(24.0), h + 40.0));
                     let lp = rp.with_clip_rect(cell.intersect(rp.clip_rect()));
-                    lp.text(pos2(pts[i].x, plot.bottom() + 6.0), Align2::CENTER_TOP, &cells[0], font(11.0), DIM);
+                    lp.text(pos2(pts[i].x, plot.bottom() + 6.0), Align2::CENTER_TOP, &cells[0], font(11.0), DIM());
                     if n <= 12 {
-                        lp.text(pts[i] - vec2(0.0, 8.0), Align2::CENTER_BOTTOM, format!("{}{}", cells.get(1).map(String::as_str).unwrap_or(""), unit), font(11.0), if top_one { TEXT } else { SOFT });
+                        lp.text(pts[i] - vec2(0.0, 8.0), Align2::CENTER_BOTTOM, format!("{}{}", cells.get(1).map(String::as_str).unwrap_or(""), unit), font(11.0), if top_one { TEXT() } else { SOFT() });
                     }
                 }
             } else {
@@ -1350,7 +1382,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let total: f32 = vals.iter().map(|v| v.max(0.0)).sum::<f32>().max(1e-6);
                 let rad = ((h - 16.0) / 2.0).min(w * 0.22).max(30.0);
                 let center = pos2(x + rad + 8.0, top + h / 2.0);
-                let shades = [ORANGE, SOFT, DIM, GREEN, AMBER, RED, FAINT, EDGE];
+                let shades = [ORANGE(), SOFT(), DIM(), GREEN(), AMBER(), RED(), FAINT(), EDGE()];
                 let mut start = -std::f32::consts::FRAC_PI_2;
                 for (i, v) in vals.iter().enumerate() {
                     let sweep = std::f32::consts::TAU * v.max(0.0) / total * k;
@@ -1360,7 +1392,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     p.add(egui::Shape::line(arc, Stroke::new(15.0, shades[i % shades.len()])));
                     start += sweep;
                 }
-                p.text(center, Align2::CENTER_CENTER, format!("{}{}", trim_num(total), unit), bold(14.0), TEXT);
+                p.text(center, Align2::CENTER_CENTER, format!("{}{}", trim_num(total), unit), bold(14.0), TEXT());
                 let lx = center.x + rad + 22.0;
                 let rh = 24.0_f32.min((h - 8.0) / vals.len() as f32);
                 let ly = top + (h - rh * vals.len() as f32) / 2.0;
@@ -1368,8 +1400,8 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     let (rp, _) = cx.row(p, item);
                     let y = ly + i as f32 * rh + rh / 2.0;
                     rp.circle_filled(pos2(lx + 5.0, y), 4.5, shades[i % shades.len()]);
-                    let right = rp.text(pos2(body.right(), y), Align2::RIGHT_CENTER, if unit.trim() == "%" { format!("{}%", cells.get(1).map(String::as_str).unwrap_or("")) } else { format!("{}{}  {:.0}%", cells.get(1).map(String::as_str).unwrap_or(""), unit, vals[i].max(0.0) / total * 100.0) }, font(12.5), SOFT);
-                    rp.with_clip_rect(Rect::from_min_max(pos2(lx + 16.0, y - rh / 2.0), pos2(right.left() - 8.0, y + rh / 2.0)).intersect(rp.clip_rect())).text(pos2(lx + 18.0, y), Align2::LEFT_CENTER, &cells[0], bold(13.0), TEXT);
+                    let right = rp.text(pos2(body.right(), y), Align2::RIGHT_CENTER, if unit.trim() == "%" { format!("{}%", cells.get(1).map(String::as_str).unwrap_or("")) } else { format!("{}{}  {:.0}%", cells.get(1).map(String::as_str).unwrap_or(""), unit, vals[i].max(0.0) / total * 100.0) }, font(12.5), SOFT());
+                    rp.with_clip_rect(Rect::from_min_max(pos2(lx + 16.0, y - rh / 2.0), pos2(right.left() - 8.0, y + rh / 2.0)).intersect(rp.clip_rect())).text(pos2(lx + 18.0, y), Align2::LEFT_CENTER, &cells[0], bold(13.0), TEXT());
                 }
             }
             h
@@ -1389,9 +1421,9 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let note = c.field("text").to_string();
             let list_h = if body.height() > 300.0 && legs > 0 { legs as f32 * 22.0 + 10.0 + if note.is_empty() { 0.0 } else { 20.0 } } else { 0.0 };
             let map = Rect::from_min_max(body.min, pos2(body.right(), (body.bottom() - list_h).max(body.top() + 170.0)));
-            p.rect_filled(map, 14.0, mix(CARD, RAISED, 0.45));
+            p.rect_filled(map, 14.0, mix(CARD(), RAISED(), 0.45));
             if stops.len() < 2 {
-                p.text(map.center(), Align2::CENTER_CENTER, "들르는 곳이 둘 이상 있어야 길을 그립니다", font(12.5), FAINT);
+                p.text(map.center(), Align2::CENTER_CENTER, "들르는 곳이 둘 이상 있어야 길을 그립니다", font(12.5), FAINT());
                 return map.height();
             }
             // 저장해 둔 길의 모양. 없거나 지금의 출발·도착과 맞지 않으면 곧은 선으로 잇는다.
@@ -1429,8 +1461,8 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let shown = total_len * k;
             let mut drawn: Vec<Pos2> = pts.iter().zip(&along).take_while(|(_, a)| **a <= shown).map(|(q, _)| *q).collect();
             drawn.push(at_len(shown));
-            p.add(egui::Shape::line(drawn.clone(), Stroke::new(6.0, mix(CARD, RAISED, 0.45))));
-            p.add(egui::Shape::line(drawn, Stroke::new(2.6, SOFT)));
+            p.add(egui::Shape::line(drawn.clone(), Stroke::new(6.0, mix(CARD(), RAISED(), 0.45))));
+            p.add(egui::Shape::line(drawn, Stroke::new(2.6, SOFT())));
             // 들르는 곳이 길 위의 어디쯤인지 (길을 따라 앞에서부터 가장 가까운 점)
             let mut from = 0;
             let mut stop_at: Vec<f32> = Vec::new();
@@ -1448,7 +1480,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             // 이름표: 표식의 오른쪽, 왼쪽, 위, 아래 가운데 다른 것과 겹치지 않는 자리에 놓는다.
             let frame = map.shrink(6.0);
             for (n, s) in stops.iter().enumerate() {
-                let size = p.layout_no_wrap(s.0.clone(), bold(12.0), TEXT).size();
+                let size = p.layout_no_wrap(s.0.clone(), bold(12.0), TEXT()).size();
                 let m = marks[n];
                 let spots = [
                     Rect::from_min_size(m + vec2(14.0, -size.y / 2.0), size),
@@ -1459,8 +1491,8 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let free = |r: &Rect| frame.contains_rect(*r) && !taken.iter().any(|t| t.expand(2.0).intersects(*r));
                 let r = spots.iter().find(|r| free(r)).or_else(|| spots.iter().find(|r| frame.contains_rect(**r))).copied().unwrap_or(spots[0]);
                 let lp = p.with_clip_rect(frame.intersect(p.clip_rect()));
-                lp.rect_filled(r.expand2(vec2(4.0, 1.0)), 5.0, mix(CARD, RAISED, 0.45).gamma_multiply(0.85));
-                lp.text(r.min, Align2::LEFT_TOP, &s.0, bold(12.0), TEXT);
+                lp.rect_filled(r.expand2(vec2(4.0, 1.0)), 5.0, mix(CARD(), RAISED(), 0.45).gamma_multiply(0.85));
+                lp.text(r.min, Align2::LEFT_TOP, &s.0, bold(12.0), TEXT());
                 taken.push(r.expand2(vec2(4.0, 1.0)));
             }
             // 구간마다 거리·시간: 그 구간의 한가운데에. 자리가 없으면 그리지 않는다 (아래 목록에 있다).
@@ -1470,12 +1502,12 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     continue;
                 }
                 let mid = at_len((stop_at[n] + stop_at[n + 1]) / 2.0);
-                let size = p.layout_no_wrap(leg.clone(), font(11.0), SOFT).size() + vec2(14.0, 6.0);
+                let size = p.layout_no_wrap(leg.clone(), font(11.0), SOFT()).size() + vec2(14.0, 6.0);
                 let spots = [Rect::from_center_size(mid, size), Rect::from_center_size(mid + vec2(0.0, -18.0), size), Rect::from_center_size(mid + vec2(0.0, 18.0), size)];
                 if let Some(r) = spots.iter().find(|r| frame.contains_rect(**r) && !taken.iter().any(|t| t.expand(2.0).intersects(**r))) {
-                    p.rect_filled(*r, r.height() / 2.0, CARD);
-                    p.rect_stroke(*r, r.height() / 2.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
-                    p.text(r.center(), Align2::CENTER_CENTER, leg, font(11.0), SOFT);
+                    p.rect_filled(*r, r.height() / 2.0, CARD());
+                    p.rect_stroke(*r, r.height() / 2.0, Stroke::new(1.0, BORDER()), StrokeKind::Inside);
+                    p.text(r.center(), Align2::CENTER_CENTER, leg, font(11.0), SOFT());
                     taken.push(*r);
                 }
             }
@@ -1484,25 +1516,25 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let end = n == 0 || n + 1 == marks.len();
                 let seen = stop_at[n] <= shown + 1.0;
                 let a = if seen { 1.0 } else { 0.35 };
-                p.circle_filled(*m, 10.0, if end { if n == 0 { ORANGE.gamma_multiply(a) } else { TEXT.gamma_multiply(a) } } else { CARD });
+                p.circle_filled(*m, 10.0, if end { if n == 0 { ORANGE().gamma_multiply(a) } else { TEXT().gamma_multiply(a) } } else { CARD() });
                 if !end {
-                    p.circle_stroke(*m, 10.0, Stroke::new(1.6, SOFT.gamma_multiply(a)));
+                    p.circle_stroke(*m, 10.0, Stroke::new(1.6, SOFT().gamma_multiply(a)));
                 }
-                p.text(*m, Align2::CENTER_CENTER, format!("{}", n + 1), bold(11.0), if end { CARD } else { SOFT.gamma_multiply(a) });
+                p.text(*m, Align2::CENTER_CENTER, format!("{}", n + 1), bold(11.0), if end { CARD() } else { SOFT().gamma_multiply(a) });
             }
             // 전체 거리·시간, 그리고 축척
             let total = c.field("total");
             if !total.is_empty() {
-                p.with_clip_rect(frame.intersect(p.clip_rect())).text(map.min + vec2(16.0, 13.0), Align2::LEFT_TOP, total, bold(15.5), TEXT);
+                p.with_clip_rect(frame.intersect(p.clip_rect())).text(map.min + vec2(16.0, 13.0), Align2::LEFT_TOP, total, bold(15.5), TEXT());
             }
             let nice = [200.0_f32, 100.0, 50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1];
             if let Some(km) = nice.iter().find(|km| **km * scale <= map.width() * 0.22) {
                 let (a, b) = (pos2(map.right() - 16.0 - km * scale, map.bottom() - 16.0), pos2(map.right() - 16.0, map.bottom() - 16.0));
-                p.line_segment([a, b], Stroke::new(1.2, FAINT));
-                p.line_segment([a - vec2(0.0, 3.0), a + vec2(0.0, 3.0)], Stroke::new(1.2, FAINT));
-                p.line_segment([b - vec2(0.0, 3.0), b + vec2(0.0, 3.0)], Stroke::new(1.2, FAINT));
+                p.line_segment([a, b], Stroke::new(1.2, FAINT()));
+                p.line_segment([a - vec2(0.0, 3.0), a + vec2(0.0, 3.0)], Stroke::new(1.2, FAINT()));
+                p.line_segment([b - vec2(0.0, 3.0), b + vec2(0.0, 3.0)], Stroke::new(1.2, FAINT()));
                 let label = if *km >= 1.0 { format!("{km:.0}km") } else { format!("{:.0}m", km * 1000.0) };
-                p.text(pos2((a.x + b.x) / 2.0, a.y - 4.0), Align2::CENTER_BOTTOM, label, font(10.0), FAINT);
+                p.text(pos2((a.x + b.x) / 2.0, a.y - 4.0), Align2::CENTER_BOTTOM, label, font(10.0), FAINT());
             }
             if k < 1.0 {
                 *cx.moving = true;
@@ -1511,14 +1543,14 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             if list_h > 0.0 {
                 for n in 0..legs {
                     let y = map.bottom() + 10.0 + n as f32 * 22.0 + 11.0;
-                    let right = p.text(pos2(body.right(), y), Align2::RIGHT_CENTER, &stops[n].2, font(12.5), SOFT);
+                    let right = p.text(pos2(body.right(), y), Align2::RIGHT_CENTER, &stops[n].2, font(12.5), SOFT());
                     let names = p.with_clip_rect(Rect::from_min_max(pos2(x, y - 11.0), pos2(right.left() - 10.0, y + 11.0)).intersect(p.clip_rect()));
-                    names.text(pos2(x + 2.0, y), Align2::LEFT_CENTER, format!("{}  {} → {}  {}", n + 1, stops[n].0, n + 2, stops[n + 1].0), font(12.5), DIM);
+                    names.text(pos2(x + 2.0, y), Align2::LEFT_CENTER, format!("{}  {} → {}  {}", n + 1, stops[n].0, n + 2, stops[n + 1].0), font(12.5), DIM());
                 }
                 if !note.is_empty() {
                     // 값의 출처와 덧붙일 말 (한 줄, 넘치면 잘린다)
                     let y = map.bottom() + 10.0 + legs as f32 * 22.0 + 12.0;
-                    p.with_clip_rect(Rect::from_min_max(pos2(x, y - 10.0), pos2(body.right(), y + 10.0)).intersect(p.clip_rect())).text(pos2(x + 2.0, y), Align2::LEFT_CENTER, &note, font(11.0), FAINT);
+                    p.with_clip_rect(Rect::from_min_max(pos2(x, y - 10.0), pos2(body.right(), y + 10.0)).intersect(p.clip_rect())).text(pos2(x + 2.0, y), Align2::LEFT_CENTER, &note, font(11.0), FAINT());
                 }
             }
             map.height() + list_h
@@ -1537,14 +1569,14 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let toks: Vec<&str> = cells.get(1).map(|s| s.split_whitespace().collect()).unwrap_or_default();
                 let label = cells.get(2).map(String::as_str).unwrap_or("");
                 let color = match cells.get(3).map(|s| s.trim()).unwrap_or("") {
-                    "accent" | "orange" | "주황" | "강조" => ORANGE,
-                    "green" | "초록" => GREEN,
-                    "red" | "빨강" => RED,
-                    "amber" | "yellow" | "노랑" => AMBER,
-                    "dim" | "gray" | "회색" => DIM,
-                    "faint" | "옅게" => FAINT,
-                    "white" | "밝게" => TEXT,
-                    _ => SOFT,
+                    "accent" | "orange" | "주황" | "강조" => ORANGE(),
+                    "green" | "초록" => GREEN(),
+                    "red" | "빨강" => RED(),
+                    "amber" | "yellow" | "노랑" => AMBER(),
+                    "dim" | "gray" | "회색" => DIM(),
+                    "faint" | "옅게" => FAINT(),
+                    "white" | "밝게" => TEXT(),
+                    _ => SOFT(),
                 };
                 let size = match cells.get(4).map(|s| s.trim()).unwrap_or("") {
                     "s" | "작게" => 10.5,
@@ -1565,7 +1597,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                             let mid = points[0].lerp(points[points.len() - 1], 0.5);
                             let sz = rp.layout_no_wrap(label.to_string(), font(size), color).size();
                             let r = Rect::from_center_size(mid + vec2(0.0, -10.0), sz + vec2(8.0, 2.0));
-                            rp.rect_filled(r, 4.0, CARD.gamma_multiply(0.9));
+                            rp.rect_filled(r, 4.0, CARD().gamma_multiply(0.9));
                             rp.text(r.center(), Align2::CENTER_CENTER, label, font(size), color);
                         }
                     }
@@ -1574,7 +1606,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                             let r = Rect::from_min_max(at(min), at((min.0 + wh.0, min.1 + wh.1)));
                             rp.rect_filled(r, 8.0, color.gamma_multiply(0.12));
                             rp.rect_stroke(r, 8.0, Stroke::new(1.4, color), StrokeKind::Inside);
-                            rp.with_clip_rect(r.shrink(4.0).intersect(rp.clip_rect())).text(r.center(), Align2::CENTER_CENTER, label, bold(size), TEXT);
+                            rp.with_clip_rect(r.shrink(4.0).intersect(rp.clip_rect())).text(r.center(), Align2::CENTER_CENTER, label, bold(size), TEXT());
                         }
                     }
                     "circle" if toks.len() >= 2 => {
@@ -1582,7 +1614,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                             let rad = bw.min(bh) * radius.clamp(0.5, 50.0) / 100.0;
                             rp.circle_filled(at(center), rad, color.gamma_multiply(0.12));
                             rp.circle_stroke(at(center), rad, Stroke::new(1.4, color));
-                            rp.text(at(center), Align2::CENTER_CENTER, label, bold(size), TEXT);
+                            rp.text(at(center), Align2::CENTER_CENTER, label, bold(size), TEXT());
                         }
                     }
                     "text" if !points.is_empty() => {
@@ -1602,7 +1634,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let label_w = c
                 .items
                 .iter()
-                .map(|(_, cells)| p.layout_no_wrap(cells[0].clone(), bold(13.0), TEXT).size().x)
+                .map(|(_, cells)| p.layout_no_wrap(cells[0].clone(), bold(13.0), TEXT()).size().x)
                 .fold(0.0_f32, f32::max)
                 .min(w * 0.38)
                 + 16.0;
@@ -1612,17 +1644,17 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let (rp, dy) = cx.row(p, item);
                 let y = top + i as f32 * rh + dy;
                 let lr = Rect::from_min_size(pos2(x, y), vec2(label_w - 10.0, rh));
-                rp.with_clip_rect(lr.intersect(rp.clip_rect())).text(pos2(x, y + rh / 2.0), Align2::LEFT_CENTER, &cells[0], bold(13.0), TEXT);
+                rp.with_clip_rect(lr.intersect(rp.clip_rect())).text(pos2(x, y + rh / 2.0), Align2::LEFT_CENTER, &cells[0], bold(13.0), TEXT());
                 let track = Rect::from_min_size(pos2(x + label_w, y + rh / 2.0 - 3.0), vec2((w - label_w - value_w).max(10.0), 6.0));
-                rp.rect_filled(track, 3.0, RAISED);
+                rp.rect_filled(track, 3.0, RAISED());
                 let frac = cx.num(item, vals[i] / max);
-                rp.rect_filled(Rect::from_min_size(track.min, vec2((track.width() * frac).max(6.0), 6.0)), 3.0, SOFT);
+                rp.rect_filled(Rect::from_min_size(track.min, vec2((track.width() * frac).max(6.0), 6.0)), 3.0, SOFT());
                 rp.text(
                     pos2(body.right(), y + rh / 2.0),
                     Align2::RIGHT_CENTER,
                     format!("{}{}", cells.get(1).map(String::as_str).unwrap_or(""), unit_s),
                     font(13.0),
-                    SOFT,
+                    SOFT(),
                 );
             }
             c.items.len() as f32 * rh
@@ -1634,12 +1666,12 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             // 열 너비는 내용 길이에 맞춘다. 다 들어가면 남는 폭을 고르게 나누고, 넘치면 긴 열부터 줄인다.
             let mut want = vec![40.0_f32; n];
             for (i, name) in cols.iter().enumerate() {
-                want[i] = want[i].max(p.layout_no_wrap(name.to_string(), font(11.0), FAINT).size().x);
+                want[i] = want[i].max(p.layout_no_wrap(name.to_string(), font(11.0), FAINT()).size().x);
             }
             for (_, cells) in &c.items {
                 for (i, text) in cells.iter().enumerate().take(n) {
                     let f = if i == 0 { bold(13.5) } else { font(13.5) };
-                    want[i] = want[i].max(p.layout_no_wrap(text.clone(), f, TEXT).size().x);
+                    want[i] = want[i].max(p.layout_no_wrap(text.clone(), f, TEXT()).size().x);
                 }
             }
             let pad = 16.0;
@@ -1670,7 +1702,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             };
             if !cols.is_empty() {
                 for (i, name) in cols.iter().enumerate() {
-                    cell(p, i, y - 4.0, name, font(11.0), FAINT);
+                    cell(p, i, y - 4.0, name, font(11.0), FAINT());
                 }
                 y += 24.0;
             }
@@ -1679,9 +1711,9 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let (rp, dy) = cx.row(p, item);
                 for (i, text) in cells.iter().enumerate() {
                     if i == 0 {
-                        cell(&rp, i, y + dy, text, bold(13.5), TEXT);
+                        cell(&rp, i, y + dy, text, bold(13.5), TEXT());
                     } else {
-                        cell(&rp, i, y + dy, text, font(13.5), DIM);
+                        cell(&rp, i, y + dy, text, font(13.5), DIM());
                     }
                 }
                 y += 28.0;
@@ -1691,13 +1723,13 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
 
         Kind::Progress => {
             let pct = cx.num("pct", c.field("pct").parse().unwrap_or(0.0));
-            let r = p.text(pos2(x, top - 6.0), Align2::LEFT_TOP, format!("{pct:.0}%"), bold(30.0), TEXT);
+            let r = p.text(pos2(x, top - 6.0), Align2::LEFT_TOP, format!("{pct:.0}%"), bold(30.0), TEXT());
             let tx = r.right() + 12.0;
             let tp = p.with_clip_rect(Rect::from_min_max(pos2(tx, top), pos2(body.right(), top + 30.0)).intersect(p.clip_rect()));
-            tp.text(pos2(tx, r.bottom() - 9.0), Align2::LEFT_BOTTOM, c.field("text"), font(12.5), DIM);
+            tp.text(pos2(tx, r.bottom() - 9.0), Align2::LEFT_BOTTOM, c.field("text"), font(12.5), DIM());
             let track = Rect::from_min_size(pos2(x, top + 38.0), vec2(w, 6.0));
-            p.rect_filled(track, 3.0, RAISED);
-            p.rect_filled(Rect::from_min_size(track.min, vec2((w * pct / 100.0).max(6.0), 6.0)), 3.0, SOFT);
+            p.rect_filled(track, 3.0, RAISED());
+            p.rect_filled(Rect::from_min_size(track.min, vec2((w * pct / 100.0).max(6.0), 6.0)), 3.0, SOFT());
             let mut y = top + 58.0;
             for (item, cells) in &c.items {
                 let (rp, dy) = cx.row(p, item);
@@ -1705,9 +1737,9 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 state_dot(&rp, pos2(x + 8.0, y + 13.0 + dy), state, now, cx.moving);
                 let label = cells.get(1).map(String::as_str).unwrap_or("");
                 if state == "run" {
-                    rp.text(pos2(x + 26.0, y + 13.0 + dy), Align2::LEFT_CENTER, label, bold(13.5), TEXT);
+                    rp.text(pos2(x + 26.0, y + 13.0 + dy), Align2::LEFT_CENTER, label, bold(13.5), TEXT());
                 } else {
-                    rp.text(pos2(x + 26.0, y + 13.0 + dy), Align2::LEFT_CENTER, label, font(13.5), DIM);
+                    rp.text(pos2(x + 26.0, y + 13.0 + dy), Align2::LEFT_CENTER, label, font(13.5), DIM());
                 }
                 y += 28.0;
             }
@@ -1729,14 +1761,14 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 // 체크 상태가 바뀌면 채움이 부드럽게 들어오고 나간다.
                 let fill = cx.num(&format!("chk:{item}"), if done { 1.0 } else { 0.0 });
                 let bx = Rect::from_center_size(pos2(x + 9.0, y + 14.0 + dy), vec2(17.0, 17.0));
-                rp.rect_stroke(bx, 5.0, Stroke::new(1.3, if hover { TEXT } else { mix(EDGE, SOFT, fill) }), StrokeKind::Inside);
+                rp.rect_stroke(bx, 5.0, Stroke::new(1.3, if hover { TEXT() } else { mix(EDGE(), SOFT(), fill) }), StrokeKind::Inside);
                 if fill > 0.01 {
-                    rp.rect_filled(bx.shrink(8.5 * (1.0 - fill)), 5.0, SOFT);
+                    rp.rect_filled(bx.shrink(8.5 * (1.0 - fill)), 5.0, SOFT());
                     if fill > 0.6 {
-                        check_mark(&rp, bx.center(), CARD);
+                        check_mark(&rp, bx.center(), CARD());
                     }
                 }
-                rp.text(pos2(x + 28.0, y + 14.0 + dy), Align2::LEFT_CENTER, label, font(13.5), mix(TEXT, FAINT, fill));
+                rp.text(pos2(x + 28.0, y + 14.0 + dy), Align2::LEFT_CENTER, label, font(13.5), mix(TEXT(), FAINT(), fill));
                 y += 28.0;
             }
             y - top
@@ -1744,12 +1776,12 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
 
         Kind::Input => {
             // 사용자가 값을 직접 넣는 카드: 항목마다 이름과 입력 칸(글, 숫자, 날짜, 슬라이더), 맨 아래에 보내기.
-            let mut y = top + wrapped(p, body.min, w, c.field("text"), 14.5, SOFT) + 12.0;
+            let mut y = top + wrapped(p, body.min, w, c.field("text"), 14.5, SOFT()) + 12.0;
             let sent = !c.field("sent").is_empty();
             let editable = !sent && cx.live && cx.alpha >= 0.9;
             for (item, cells) in &c.items {
                 let (rp, dy) = cx.row(p, item);
-                rp.text(pos2(x + 2.0, y + dy), Align2::LEFT_TOP, &cells[0], font(12.0), DIM);
+                rp.text(pos2(x + 2.0, y + dy), Align2::LEFT_TOP, &cells[0], font(12.0), DIM());
                 let spec = cells.get(1).map(|s| s.trim()).unwrap_or("");
                 let answer = cells.get(2).cloned().unwrap_or_default();
                 let value = cx.inputs.get(item).cloned().filter(|v| !v.is_empty()).unwrap_or_else(|| answer.clone());
@@ -1763,11 +1795,11 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                         let track = Rect::from_min_max(pos2(r.left() + 8.0, r.center().y - 3.0), pos2(r.right() - 92.0, r.center().y + 3.0));
                         let k = if hi > lo { (cur - lo) / (hi - lo) } else { 0.0 };
                         let knob = pos2(track.left() + track.width() * k, track.center().y);
-                        rp.rect_filled(track, 3.0, RAISED);
-                        rp.rect_filled(Rect::from_min_max(track.min, pos2(knob.x, track.max.y)), 3.0, if touched { SOFT } else { BORDER });
-                        rp.circle_filled(knob, 8.0, if touched { TEXT } else { DIM });
+                        rp.rect_filled(track, 3.0, RAISED());
+                        rp.rect_filled(Rect::from_min_max(track.min, pos2(knob.x, track.max.y)), 3.0, if touched { SOFT() } else { BORDER() });
+                        rp.circle_filled(knob, 8.0, if touched { TEXT() } else { DIM() });
                         let shown = if touched { format!("{}{}", trim_num(cur), if unit.is_empty() { String::new() } else { format!(" {unit}") }) } else { format!("{}~{} {unit}", trim_num(lo), trim_num(hi)) };
-                        rp.with_clip_rect(Rect::from_min_max(pos2(track.right() + 12.0, r.top()), r.max).intersect(rp.clip_rect())).text(pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, shown, bold(13.0), if touched { TEXT } else { FAINT });
+                        rp.with_clip_rect(Rect::from_min_max(pos2(track.right() + 12.0, r.top()), r.max).intersect(rp.clip_rect())).text(pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, shown, bold(13.0), if touched { TEXT() } else { FAINT() });
                         if editable {
                             let grab = Rect::from_min_max(pos2(track.left() - 10.0, r.top()), pos2(track.right() + 10.0, r.bottom()));
                             let resp = cx.ui.interact(grab, cx.id.with(("slider", item.as_str())), Sense::click_and_drag()).on_hover_cursor(CursorIcon::PointingHand);
@@ -1783,16 +1815,16 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     }
                     InputKind::Date => {
                         // 달력에서 고른다. 칸을 누르면 아래에 달력이 펼쳐진다.
-                        rp.rect_filled(r, 11.0, RAISED);
-                        rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                        rp.rect_filled(r, 11.0, RAISED());
+                        rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER()), StrokeKind::Inside);
                         let open_key = format!("{item}#open");
                         let open = editable && cx.inputs.get(&open_key).map(|v| v == "1").unwrap_or(false);
                         if value.is_empty() {
-                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, "날짜 고르기", font(14.0), FAINT);
+                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, "날짜 고르기", font(14.0), FAINT());
                         } else {
-                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT);
+                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT());
                         }
-                        rp.text(pos2(r.right() - 14.0, r.center().y), Align2::RIGHT_CENTER, if open { "닫기" } else { "달력" }, font(11.0), DIM);
+                        rp.text(pos2(r.right() - 14.0, r.center().y), Align2::RIGHT_CENTER, if open { "닫기" } else { "달력" }, font(11.0), DIM());
                         if editable && cx.click(r, ("date", item.as_str())).map(|x| x.clicked()).unwrap_or(false) {
                             cx.input_ops.push((open_key.clone(), if open { "0".into() } else { "1".into() }));
                         }
@@ -1814,11 +1846,11 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                             let cal_top = r.bottom() + 8.0;
                             let (cw, chh) = (w / 7.0, 26.0);
                             // 머리: 이전 달, 연·월, 다음 달
-                            rp.text(pos2(x + w / 2.0, cal_top + 11.0), Align2::CENTER_CENTER, format!("{yy}년 {mm}월"), bold(13.0), TEXT);
+                            rp.text(pos2(x + w / 2.0, cal_top + 11.0), Align2::CENTER_CENTER, format!("{yy}년 {mm}월"), bold(13.0), TEXT());
                             for (dir, label, bx) in [(-1i32, "이전", x), (1, "다음", x + w - 44.0)] {
                                 let br = Rect::from_min_size(pos2(bx, cal_top), vec2(44.0, 22.0));
                                 let hov = cx.click(br, (if dir < 0 { "calprev" } else { "calnext" }, item.as_str()));
-                                rp.text(br.center(), Align2::CENTER_CENTER, label, font(11.5), if hov.as_ref().map(|h| h.hovered()).unwrap_or(false) { TEXT } else { DIM });
+                                rp.text(br.center(), Align2::CENTER_CENTER, label, font(11.5), if hov.as_ref().map(|h| h.hovered()).unwrap_or(false) { TEXT() } else { DIM() });
                                 if hov.map(|h| h.clicked()).unwrap_or(false) {
                                     let total = yy * 12 + (mm as i32 - 1) + dir;
                                     cx.input_ops.push((ym_key.clone(), format!("{:04}-{:02}", total.div_euclid(12), total.rem_euclid(12) + 1)));
@@ -1826,7 +1858,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                             }
                             let names = ["일", "월", "화", "수", "목", "금", "토"];
                             for (i, n) in names.iter().enumerate() {
-                                rp.text(pos2(x + cw * (i as f32 + 0.5), cal_top + 34.0), Align2::CENTER_CENTER, *n, font(10.5), FAINT);
+                                rp.text(pos2(x + cw * (i as f32 + 0.5), cal_top + 34.0), Align2::CENTER_CENTER, *n, font(10.5), FAINT());
                             }
                             for d in 1..=days {
                                 let idx = first + d - 1;
@@ -1836,12 +1868,12 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                                 let resp = cx.click(cell, ("day", &format!("{item}{d}")));
                                 let hov = resp.as_ref().map(|h| h.hovered()).unwrap_or(false);
                                 if picked || hov {
-                                    rp.rect_filled(cell.shrink(2.0), 8.0, if picked { SOFT } else { RAISED });
+                                    rp.rect_filled(cell.shrink(2.0), 8.0, if picked { SOFT() } else { RAISED() });
                                 }
                                 if date == today && !picked {
-                                    rp.rect_stroke(cell.shrink(2.0), 8.0, Stroke::new(1.0, EDGE), StrokeKind::Inside);
+                                    rp.rect_stroke(cell.shrink(2.0), 8.0, Stroke::new(1.0, EDGE()), StrokeKind::Inside);
                                 }
-                                rp.text(cell.center(), Align2::CENTER_CENTER, format!("{d}"), font(12.5), if picked { CARD } else { TEXT });
+                                rp.text(cell.center(), Align2::CENTER_CENTER, format!("{d}"), font(12.5), if picked { CARD() } else { TEXT() });
                                 if resp.map(|h| h.clicked()).unwrap_or(false) {
                                     cx.input_ops.push((item.clone(), format!("{date} ({})", names[(idx % 7) as usize])));
                                     cx.input_ops.push((open_key.clone(), "0".into()));
@@ -1852,17 +1884,17 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     }
                     kind => {
                         // 글 또는 숫자를 적는 칸
-                        rp.rect_filled(r, 11.0, RAISED);
-                        rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                        rp.rect_filled(r, 11.0, RAISED());
+                        rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER()), StrokeKind::Inside);
                         let numeric = matches!(kind, InputKind::Number);
                         let hint = if numeric { "숫자".to_string() } else if spec == "-" { String::new() } else { spec.to_string() };
                         if !editable {
                             // 이미 보냈거나 멀리서 보는 중: 적힌 값만 보여 준다.
                             let inner = rp.with_clip_rect(r.shrink2(vec2(12.0, 0.0)).intersect(rp.clip_rect()));
                             if value.is_empty() {
-                                inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &hint, font(14.0), FAINT);
+                                inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &hint, font(14.0), FAINT());
                             } else {
-                                inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT);
+                                inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT());
                             }
                         } else {
                             cx.fields.push((r.shrink2(vec2(12.0, 7.0)), item.clone(), hint, answer, numeric));
@@ -1873,13 +1905,13 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             }
             let br = Rect::from_min_size(pos2(x + w - 92.0, y + 2.0), vec2(92.0, 34.0));
             if sent {
-                p.text(br.right_center(), Align2::RIGHT_CENTER, "보냈습니다", font(12.5), DIM);
+                p.text(br.right_center(), Align2::RIGHT_CENTER, "보냈습니다", font(12.5), DIM());
             } else {
                 let ready = c.items.iter().any(|(i, _)| cx.inputs.get(i).map(|v| !v.trim().is_empty()).unwrap_or(false));
                 let resp = cx.click(br, ("send", ""));
                 let hover = resp.as_ref().map(|r| r.hovered()).unwrap_or(false);
-                p.rect_filled(br, 17.0, if ready { mix(SOFT, TEXT, if hover { 1.0 } else { 0.0 }) } else { RAISED });
-                p.text(br.center(), Align2::CENTER_CENTER, "보내기", bold(13.5), if ready { CARD } else { FAINT });
+                p.rect_filled(br, 17.0, if ready { mix(SOFT(), TEXT(), if hover { 1.0 } else { 0.0 }) } else { RAISED() });
+                p.text(br.center(), Align2::CENTER_CENTER, "보내기", bold(13.5), if ready { CARD() } else { FAINT() });
                 if ready && resp.map(|r| r.clicked()).unwrap_or(false) {
                     let out = input_lines(c, cx.inputs);
                     cx.lines.extend(out);
@@ -1895,8 +1927,8 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let h = body.height().max(120.0);
             let area = Rect::from_min_max(body.min, pos2(body.right(), top + h - if caption.is_empty() { 0.0 } else { 24.0 }));
             if src.is_empty() {
-                p.rect_filled(area, 10.0, RAISED);
-                p.text(area.center(), Align2::CENTER_CENTER, "그림이 아직 없습니다", font(12.0), FAINT);
+                p.rect_filled(area, 10.0, RAISED());
+                p.text(area.center(), Align2::CENTER_CENTER, "그림이 아직 없습니다", font(12.0), FAINT());
             } else {
                 match crate::pics::show(cx.ui.ctx(), &src) {
                     crate::pics::Shown::Ready(id, size) => {
@@ -1905,24 +1937,24 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                         p.image(id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                     }
                     crate::pics::Shown::Loading => {
-                        p.rect_filled(area, 10.0, RAISED);
-                        p.text(area.center(), Align2::CENTER_CENTER, "그림을 불러오는 중", font(12.0), FAINT);
+                        p.rect_filled(area, 10.0, RAISED());
+                        p.text(area.center(), Align2::CENTER_CENTER, "그림을 불러오는 중", font(12.0), FAINT());
                         *cx.moving = true;
                     }
                     crate::pics::Shown::Failed(why) => {
-                        p.rect_filled(area, 10.0, RAISED);
-                        p.with_clip_rect(area.shrink(8.0).intersect(p.clip_rect())).text(area.center(), Align2::CENTER_CENTER, why, font(12.0), RED);
+                        p.rect_filled(area, 10.0, RAISED());
+                        p.with_clip_rect(area.shrink(8.0).intersect(p.clip_rect())).text(area.center(), Align2::CENTER_CENTER, why, font(12.0), RED());
                     }
                 }
             }
             if !caption.is_empty() {
-                p.with_clip_rect(Rect::from_min_max(pos2(x, area.bottom()), pos2(body.right(), top + h)).intersect(p.clip_rect())).text(pos2(x + 2.0, area.bottom() + 13.0), Align2::LEFT_CENTER, &caption, font(12.0), DIM);
+                p.with_clip_rect(Rect::from_min_max(pos2(x, area.bottom()), pos2(body.right(), top + h)).intersect(p.clip_rect())).text(pos2(x + 2.0, area.bottom() + 13.0), Align2::LEFT_CENTER, &caption, font(12.0), DIM());
             }
             h
         }
 
         Kind::Decision => {
-            let mut y = top + wrapped(p, body.min, w, c.field("text"), 14.5, SOFT) + 12.0;
+            let mut y = top + wrapped(p, body.min, w, c.field("text"), 14.5, SOFT()) + 12.0;
             let chosen = c.field("chosen").to_string();
             for (item, cells) in &c.items {
                 let (rp, dy) = cx.row(p, item);
@@ -1938,10 +1970,10 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let on = cx.num(&format!("opt:{item}"), if chosen == *item { 1.0 } else { 0.0 });
                 let glow = cx.num(&format!("hov:{item}"), if hover { 1.0 } else { 0.0 });
                 let rad = if has_desc { 16.0 } else { 18.0 };
-                rp.rect_filled(r, rad, mix(mix(CARD, RAISED, glow), SOFT, on));
-                rp.rect_stroke(r, rad, Stroke::new(1.0, mix(mix(BORDER, EDGE, glow), SOFT, on)), StrokeKind::Inside);
+                rp.rect_filled(r, rad, mix(mix(CARD(), RAISED(), glow), SOFT(), on));
+                rp.rect_stroke(r, rad, Stroke::new(1.0, mix(mix(BORDER(), EDGE(), glow), SOFT(), on)), StrokeKind::Inside);
                 let inner = rp.with_clip_rect(r.shrink2(vec2(14.0, 0.0)).intersect(rp.clip_rect()));
-                let (c1, c2) = (mix(TEXT, CARD, on), mix(DIM, RAISED, on));
+                let (c1, c2) = (mix(TEXT(), CARD(), on), mix(DIM(), RAISED(), on));
                 if has_desc {
                     inner.text(pos2(x + 16.0, y + dy + 9.0), Align2::LEFT_TOP, &cells[0], bold(14.0), c1);
                     inner.text(pos2(x + 16.0, y + dy + 29.0), Align2::LEFT_TOP, &cells[1], font(12.0), c2);
@@ -1957,36 +1989,36 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let n = c.items.len();
             let rh = 30.0;
             if n > 1 {
-                p.line_segment([pos2(x + 6.0, top + rh / 2.0), pos2(x + 6.0, top + rh * (n as f32 - 0.5))], Stroke::new(1.2, BORDER));
+                p.line_segment([pos2(x + 6.0, top + rh / 2.0), pos2(x + 6.0, top + rh * (n as f32 - 0.5))], Stroke::new(1.2, BORDER()));
             }
             let when_w = c
                 .items
                 .iter()
-                .map(|(_, cells)| p.layout_no_wrap(cells[0].clone(), bold(12.5), TEXT).size().x)
+                .map(|(_, cells)| p.layout_no_wrap(cells[0].clone(), bold(12.5), TEXT()).size().x)
                 .fold(0.0_f32, f32::max)
                 .min(w * 0.4);
             for (i, (item, cells)) in c.items.iter().enumerate() {
                 let (rp, dy) = cx.row(p, item);
                 let y = top + i as f32 * rh + rh / 2.0 + dy;
                 let state = cells.get(2).map(String::as_str).unwrap_or("todo");
-                rp.circle_filled(pos2(x + 6.0, y), 6.0, CARD);
+                rp.circle_filled(pos2(x + 6.0, y), 6.0, CARD());
                 match state {
                     "done" => {
-                        rp.circle_filled(pos2(x + 6.0, y), 4.5, SOFT);
+                        rp.circle_filled(pos2(x + 6.0, y), 4.5, SOFT());
                     }
                     "run" => state_dot(&rp, pos2(x + 6.0, y), "run", now, cx.moving),
                     _ => {
-                        rp.circle_stroke(pos2(x + 6.0, y), 4.0, Stroke::new(1.4, EDGE));
+                        rp.circle_stroke(pos2(x + 6.0, y), 4.0, Stroke::new(1.4, EDGE()));
                     }
                 }
                 // 굵은 시점 + 옅은 내용
-                rp.text(pos2(x + 22.0, y), Align2::LEFT_CENTER, &cells[0], bold(12.5), if state == "done" { DIM } else { TEXT });
+                rp.text(pos2(x + 22.0, y), Align2::LEFT_CENTER, &cells[0], bold(12.5), if state == "done" { DIM() } else { TEXT() });
                 rp.text(
                     pos2(x + 36.0 + when_w, y),
                     Align2::LEFT_CENTER,
                     cells.get(1).map(String::as_str).unwrap_or(""),
                     font(13.5),
-                    if state == "done" { FAINT } else { SOFT },
+                    if state == "done" { FAINT() } else { SOFT() },
                 );
             }
             n as f32 * rh

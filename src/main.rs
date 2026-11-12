@@ -11,6 +11,7 @@ mod jobs;
 mod lang;
 mod llm;
 mod memory;
+mod phone;
 mod pics;
 mod route;
 mod sys;
@@ -123,6 +124,8 @@ struct App {
     review: Vec<String>,
     /// 웹 카드 위에 올려 둔 브라우저 화면
     webviews: std::collections::HashMap<String, Web>,
+    /// 웹 카드 위치를 마지막으로 맞췄을 때의 창 크기. Mac 은 창 아래쪽 기준 좌표라 창 크기가 바뀌면 다시 맞춘다.
+    web_win: egui::Vec2,
     /// 말로 대화하는 중인가 (마이크 스위치). 켜져 있으면 듣기 → 답하기 → 다시 듣기를 되풀이한다.
     converse: bool,
     mic: Option<audio::Mic>,
@@ -130,6 +133,26 @@ struct App {
     /// 이번 녹음에서 말소리가 들렸는가, 그리고 조용해지기 시작한 때
     heard: bool,
     quiet_since: Option<std::time::Instant>,
+    /// AI 가 말하는 동안 마이크에 들어오는 소리의 평균 크기 (스피커 소리가 되돌아 들어오는 양)
+    echo: f32,
+    /// AI 가 말하는 동안 평균보다 크게 들리기 시작한 때 (사용자가 끼어드는 중일 수 있다)
+    barge_since: Option<std::time::Instant>,
+    /// 사용자가 말을 끊었다: 이번 턴의 남은 말은 소리 내지 않고 화면에만 반영한다.
+    hush: bool,
+    /// 이번 턴의 시간 재기 (data/timing.jsonl 에 남긴다)
+    tm: TurnTiming,
+    /// 받아쓰기를 맡긴 때와 그 소리의 길이(초)
+    stt_started: Option<(std::time::Instant, f32)>,
+    /// 마지막 받아쓰기에 걸린 시간 (다음 턴 기록에 붙인다)
+    stt_done: Option<(u64, f32)>,
+    /// 이번 턴의 say 가운데 아직 소리 내지 않은 마지막 것 (끝까지 아무 말도 안 했으면 그것을 읽는다)
+    quiet_say: Option<String>,
+    /// 기다리는 중: 사용자가 "잠깐만", "확인해 볼게"라고 했다. 부르거나 하던 이야기로 돌아올 때까지 말하지 않고 진행하지 않는다.
+    standby: bool,
+    /// 기다리는 동안 들린 말 (사용자가 혼잣말하거나 읽거나 다른 사람과 한 말). 다시 부르면 함께 전한다.
+    asides: Vec<String>,
+    /// 기다리는 중에 들린 말이 나를 부른 것인지 작은 모델이 판단한 결과 (말, 부른 것인가)
+    wake_rx: Option<std::sync::mpsc::Receiver<(String, bool)>>,
     /// 받아쓰기 결과를 기다리는 중
     stt: Option<Receiver<Result<String, String>>>,
     /// 화면을 다시 그리게 깨우는 손잡이 (다른 스레드에서 쓴다)
@@ -269,11 +292,22 @@ impl App {
             pre: None,
             review: Vec::new(),
             webviews: Default::default(),
+            web_win: egui::Vec2::ZERO,
             converse: false,
             mic: None,
             mic_since: std::time::Instant::now(),
             heard: false,
             quiet_since: None,
+            echo: 0.0,
+            barge_since: None,
+            hush: false,
+            tm: TurnTiming::default(),
+            stt_started: None,
+            stt_done: None,
+            quiet_say: None,
+            standby: false,
+            asides: Vec::new(),
+            wake_rx: None,
             stt: None,
             wake: ctx.clone(),
             tidy: None,
@@ -501,6 +535,15 @@ impl App {
                     }
                 }
                 if by == Author::User {
+                    // 문자·전화 확인 카드에서 고른 것이면, 여기서 실제로 보내거나 건다 (AI 를 거치지 않는다).
+                    let w: Vec<&str> = line.split_whitespace().collect();
+                    if let ["set", card, "chosen", option] = w.as_slice() {
+                        if let Some(ops) = phone::confirm(card, option) {
+                            for op in ops {
+                                self.apply_line(&op, Author::Ai);
+                            }
+                        }
+                    }
                     self.events.push(line.to_string());
                     // 내용에 대한 조작이면 사용자가 말을 걸지 않아도 AI 가 반응한다.
                     // 체크는 연달아 누를 수 있으니 잠깐 기다렸다 한 번에, 선택지는 바로.
@@ -561,10 +604,10 @@ impl App {
         }
         self.flush_speech();
         self.log = None; // 기록 파일을 놓아야 지울 수 있다
-        // data 폴더: 음성 켬/끔 설정만 남기고 전부 지운다.
+        // data 폴더: 음성 켬/끔과 화면 밝기 설정만 남기고 전부 지운다.
         if let Ok(rd) = std::fs::read_dir(sys::data_dir()) {
             for e in rd.flatten() {
-                if e.file_name() == "voice" {
+                if e.file_name() == "voice" || e.file_name() == "theme.txt" {
                     continue;
                 }
                 let p = e.path();
@@ -805,6 +848,9 @@ impl App {
         if self.voice {
             t += "<voice>on</voice>\n";
         }
+        if sys::english() {
+            t += "<lang>en</lang>\n";
+        }
         self.events.clear();
         // 기억 보관함의 노트 목록과 지금의 환경
         let notes = vault::index();
@@ -822,6 +868,7 @@ impl App {
     }
 
     fn send(&mut self, ctx: &egui::Context) {
+        self.standby = false; // 글로 쓰거나 다시 부르면 기다리기를 끝낸다
         let input = self.input.trim().to_string();
         if self.busy {
             // 답하는 중에도 받는다. 줄을 세워 두면 하던 일 사이에 전해지거나, 끝나자마자 이어서 처리된다.
@@ -842,6 +889,7 @@ impl App {
     /// 한 턴을 시작한다. `input` 이 비어 있으면 화면 조작만으로 시작된 턴이다.
     fn start_turn(&mut self, ctx: &egui::Context, input: String) {
         self.flush_speech(); // 말하는 중에 새로 말을 걸면 하던 말을 멈춘다
+        self.hush = false;
         self.turn_events = self.events.join(" / ");
         let mut text = self.turn_text(&input);
         // 붙여 둔 사진: 이번 말과 함께 보내고, 나중에 다시 볼 수 있게 보관함에도 남긴다.
@@ -887,6 +935,8 @@ impl App {
         self.got_output = false;
         self.pre = None;
         self.sent_at = std::time::Instant::now();
+        self.tm = TurnTiming { stt: self.stt_done.take(), ..Default::default() };
+        self.quiet_say = None;
         // 판단 모델이 먼저 볼 재료
         let pre = llm::PreInput {
             input: if auto { String::new() } else { self.cur_input.clone() },
@@ -908,11 +958,28 @@ impl App {
     /// 켜져 있으면 "문장 → 그 문장의 카드" 순서로 줄을 세워 말하는 속도에 맞춰 내보낸다.
     fn ai_line(&mut self, line: &str) {
         let t = line.trim();
-        if !self.voice {
+        if !self.voice || self.hush || self.standby {
             if !t.starts_with("tell ") {
                 self.apply_line(line, Author::Ai);
             }
             return;
+        }
+        // 한 턴에 소리 내는 말은 짧게: say 는 아직 아무 말도 안 했을 때만 읽는다 (일 시작 전 한마디).
+        // 그 뒤의 say 는 화면에만 내고, 턴이 끝날 때까지 다른 말이 없었으면 그때 읽는다 (finish_turn).
+        let said_any = !self.turn_spoken.is_empty() || !self.speech.is_empty();
+        if let Some(sv) = t.strip_prefix("say ").map(str::trim).filter(|v| !v.is_empty()) {
+            if said_any {
+                self.quiet_say = Some(sv.to_string());
+                if let Some(last) = self.speech.back_mut() {
+                    last.1.push(line.to_string());
+                } else {
+                    self.apply_line(line, Author::Ai);
+                }
+                return;
+            }
+        }
+        if t.starts_with("tell ") {
+            self.quiet_say = None; // 정리한 대답이 나왔으니 남은 한마디는 읽지 않는다
         }
         let spoken = t.strip_prefix("tell ").or_else(|| t.strip_prefix("say ")).map(str::trim).filter(|s| !s.is_empty());
         if let Some(s) = spoken {
@@ -934,6 +1001,7 @@ impl App {
         }
         match self.speech.pop_front() {
             Some((sentence, lines)) => {
+                self.tm.first_voice.get_or_insert(self.sent_at.elapsed().as_millis() as u64);
                 self.tts.speak(&sentence);
                 self.turn_spoken.push(sentence.clone());
                 self.caption = Some(sentence);
@@ -943,6 +1011,25 @@ impl App {
             }
             None => self.caption = None,
         }
+    }
+
+    /// 기다리기를 끝내고 이 말로 대화를 이어 간다. 기다리는 동안 들린 말도 함께 전한다.
+    fn wake_up(&mut self, ctx: &egui::Context, text: String) {
+        self.standby = false;
+        let asides = std::mem::take(&mut self.asides);
+        sys::log("stt.log", &format!("기다리기 끝: {text}"));
+        self.input = if asides.is_empty() {
+            text
+        } else {
+            format!("{text}\n(기다리는 동안 사용자가 혼잣말하거나 읽은 말: {})", asides.join(" / "))
+        };
+        self.send(ctx);
+    }
+
+    /// 사용자가 말을 끊었다: 지금 말을 멈추고, 이번 턴의 남은 말도 소리 내지 않는다.
+    fn silence(&mut self) {
+        self.flush_speech();
+        self.hush = true;
     }
 
     /// 말을 멈추고, 아직 화면에 나가지 않은 명령을 전부 반영한다 (보드가 어긋나지 않도록).
@@ -966,6 +1053,16 @@ impl App {
     fn finish_turn(&mut self) {
         if let Some(rest) = self.stream.finish() {
             self.ai_line(&rest);
+        }
+        // 일 시작 전 한마디만 하고 결과를 말하지 않았으면, 마지막 한마디(결과)를 읽어 준다.
+        if let Some(last) = self.quiet_say.take() {
+            if self.voice && !self.hush && !self.turn_spoken.iter().any(|x| x.trim() == last) {
+                self.speech.push_back((last, Vec::new()));
+                self.advance_speech();
+            }
+        }
+        if !self.cfg.demo() {
+            self.tm.write(&self.cur_input, self.sent_at, self.voice, &self.turn_spoken, self.error.as_deref());
         }
         for c in &mut self.board.cards {
             c.live = None;
@@ -1149,6 +1246,7 @@ impl App {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 llm::Msg::Activity(a) => {
+                    self.tm.activity(&a, self.sent_at);
                     if !a.is_empty() {
                         self.turn_actions.push(a.clone());
                         self.got_output = true;
@@ -1156,9 +1254,11 @@ impl App {
                     self.activity = a;
                 }
                 llm::Msg::Pre(p) => {
+                    self.tm.pre_ms.get_or_insert(self.sent_at.elapsed().as_millis() as u64);
                     // 음성 대화에서는 판단 모델의 결정이 나오자마자(약 0.2초) 먼저 대답한다.
                     if let Some(ack) = p.ack.clone() {
-                        if self.voice {
+                        if self.voice && !self.hush {
+                            self.tm.first_voice.get_or_insert(self.sent_at.elapsed().as_millis() as u64);
                             self.tts.speak(&ack);
                             self.caption = Some(ack.clone());
                             self.turn_spoken.push(ack);
@@ -1185,6 +1285,7 @@ impl App {
                     for s in said {
                         self.cur_input += &format!("\n+ {s}");
                     }
+                    self.hush = false; // 덧붙인 말에 대한 답은 다시 소리로 듣는다
                 }
                 llm::Msg::Board { topic, reply } => {
                     let found = self.board.topics.iter().any(|t| t.id == topic);
@@ -1225,6 +1326,7 @@ impl App {
                 },
                 llm::Msg::Screen { ops, reply } => {
                     self.got_output = true;
+                    self.tm.mark_first(self.sent_at);
                     // 일하는 도중의 화면 수정. 거부된 것이 있으면 이유를 바로 돌려준다.
                     self.turn_raw += &format!("{ops}\n");
                     debug_log("raw.log", &format!("{ops}\n"));
@@ -1240,6 +1342,7 @@ impl App {
                 llm::Msg::Delta(d) => {
                     if !d.trim().is_empty() {
                         self.got_output = true;
+                        self.tm.mark_first(self.sent_at);
                     }
                     self.turn_raw += &d;
                     debug_log("raw.log", &d);
@@ -1265,6 +1368,7 @@ impl App {
                     }
                 }
                 llm::Msg::Done(stats) => {
+                    self.tm.stats = Some(stats.clone());
                     self.stats = Some(stats);
                     self.finish_turn();
                 }
@@ -1284,14 +1388,63 @@ impl App {
     }
 
     /// 말로 대화하기. 마이크 스위치가 켜져 있는 동안: 듣는다 → 말이 끝나면 글로 바꿔 보낸다 → AI 가 답한다 → 다시 듣는다.
-    /// AI 가 말하는 동안에는 마이크를 닫아서 자기 목소리를 듣지 않게 한다.
+    /// 마이크는 AI 가 일하는 동안에도, 말하는 동안에도 열어 둔다. 일하는 중에 한 말은 하던 일에 전해지고,
+    /// 말하는 중에 사용자가 끼어들면 AI 는 말을 멈추고 듣는다.
     fn voice_input(&mut self, ctx: &egui::Context, talking: bool) {
+        if let Some(rx) = &self.wake_rx {
+            match rx.try_recv() {
+                Ok((text, yes)) => {
+                    self.wake_rx = None;
+                    if yes {
+                        self.wake_up(ctx, text);
+                    } else {
+                        sys::log("stt.log", &format!("기다리는 중, 나를 부른 말이 아니라고 봄: {text}"));
+                        self.asides.push(text);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
+                Err(_) => self.wake_rx = None,
+            }
+        }
         // 받아쓰기 결과가 왔는가
         if let Some(rx) = &self.stt {
             match rx.try_recv() {
                 Ok(Ok(text)) => {
                     self.stt = None;
-                    if !text.is_empty() {
+                    self.stt_done = self.stt_started.take().map(|(t, secs)| (t.elapsed().as_millis() as u64, secs));
+                    if self.standby && !text.trim().is_empty() {
+                        // 기다리는 중: 나를 부른 말인지 본다. 분명히 부르면 바로, 아니면 작은 모델에게 묻는다.
+                        if is_wake_word(&text) {
+                            self.wake_up(ctx, text);
+                        } else if let Some(key) = self.cfg.key.clone() {
+                            let (tx, rx) = channel();
+                            self.wake_rx = Some(rx);
+                            let context: String = self.recent.iter().rev().take(2).rev().map(|(u, a)| format!("사용자: {u}\n비서: {a}\n")).collect();
+                            let asides = self.asides.join(" / ");
+                            let wake = ctx.clone();
+                            std::thread::spawn(move || {
+                                let yes = decide::addressed(&key, &context, &asides, &text);
+                                let _ = tx.send((text, yes));
+                                wake.request_repaint();
+                            });
+                        }
+                    } else if is_wait_word(&text) {
+                        // "잠깐만", "확인해 볼게": 말을 멈추고 부를 때까지 기다린다.
+                        self.silence();
+                        self.standby = true;
+                        self.asides.clear();
+                        sys::log("stt.log", &format!("기다리기 시작: {text}"));
+                    } else if is_stop_word(&text) {
+                        // "그만", "멈춰": 말도 일도 바로 멈춘다. 새 요청으로 보내지 않는다.
+                        self.silence();
+                        if self.busy {
+                            self.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else if self.turn_spoken.iter().rev().take(3).any(|said| similar(said, &text)) {
+                        // 스피커에서 나온 AI 자기 목소리를 받아쓴 것: 버린다.
+                        sys::log("stt.log", &format!("자기 목소리로 보고 버림: {text}"));
+                    } else if !text.is_empty() {
                         self.input = text;
                         self.send(ctx);
                     }
@@ -1307,13 +1460,16 @@ impl App {
             self.mic = None;
             return;
         }
-        let free = !self.busy && !talking && self.stt.is_none() && self.react_at.is_none();
+        // 받아쓰는 중이 아니면 언제나 듣는다 (일하는 중에도, 말하는 중에도).
+        let free = self.stt.is_none() && self.react_at.is_none();
         match &self.mic {
             None if free => {
                 self.mic = Some(audio::Mic::start());
                 self.mic_since = std::time::Instant::now();
                 self.heard = false;
                 self.quiet_since = None;
+                self.echo = 0.0;
+                self.barge_since = None;
             }
             None => {}
             Some(mic) => {
@@ -1323,13 +1479,48 @@ impl App {
                     self.mic = None;
                     return;
                 }
+                let level = mic.level();
+                if talking && !self.heard {
+                    // AI 가 말하는 중: 스피커 소리가 마이크로 되돌아 들어온다. 그 평균보다 뚜렷하게 큰 소리가
+                    // 0.3초 넘게 이어지면 사용자가 끼어든 것으로 보고 말을 멈춘다.
+                    self.echo = self.echo * 0.95 + level * 0.05;
+                    let loud = level > (MIC_THRESHOLD * 1.5).max(self.echo * 2.0);
+                    match (loud, self.barge_since) {
+                        (true, None) => self.barge_since = Some(std::time::Instant::now()),
+                        (false, _) => self.barge_since = None,
+                        _ => {}
+                    }
+                    if self.barge_since.map(|t| t.elapsed().as_millis() > 200).unwrap_or(false) {
+                        mic.keep_last(0.5); // 끼어든 말의 시작은 남기고, 그 앞의 AI 목소리는 버린다
+                        self.silence();
+                        self.heard = true;
+                        self.quiet_since = None;
+                        self.mic_since = std::time::Instant::now();
+                        self.barge_since = None;
+                    } else {
+                        // 끼어들지 않았으면 AI 목소리를 쌓아 두지 않는다.
+                        mic.keep_last(0.6);
+                        self.mic_since = std::time::Instant::now();
+                    }
+                    ctx.request_repaint_after(std::time::Duration::from_millis(40));
+                    return;
+                }
                 // 말소리가 들리다가 1.1초 조용하면 말이 끝난 것으로 본다.
-                let loud = mic.level() > MIC_THRESHOLD;
+                let loud = level > MIC_THRESHOLD;
+                if loud && !self.heard && self.busy {
+                    // 일하는 중에 사용자가 말하기 시작했다: 남은 말은 소리 내지 않는다.
+                    self.hush = true;
+                }
                 if loud {
                     self.heard = true;
                     self.quiet_since = None;
                 } else if self.heard && self.quiet_since.is_none() {
                     self.quiet_since = Some(std::time::Instant::now());
+                }
+                if !self.heard {
+                    // 말이 시작되기 전의 조용한 소리는 오래 쌓아 두지 않는다.
+                    mic.keep_last(0.6);
+                    self.mic_since = std::time::Instant::now();
                 }
                 let ended = self.quiet_since.map(|t| t.elapsed().as_millis() > 1100).unwrap_or(false);
                 let too_long = self.mic_since.elapsed().as_secs() > 45;
@@ -1338,6 +1529,7 @@ impl App {
                     if self.heard && pcm.len() > 16000 / 3 {
                         let (tx, rx) = channel();
                         self.stt = Some(rx);
+                        self.stt_started = Some((std::time::Instant::now(), pcm.len() as f32 / 16000.0));
                         let wake = ctx.clone();
                         std::thread::spawn(move || {
                             let _ = tx.send(eleven::transcribe(&pcm));
@@ -1398,6 +1590,9 @@ impl App {
     /// 웹 카드마다 브라우저 화면을 하나씩 두고, 카드가 움직이면 따라가게 한다.
     fn sync_webviews(&mut self, frame: &eframe::Frame, slots: Vec<ui::WebSlot>, zoom: f32) {
         self.webviews.retain(|id, _| slots.iter().any(|s| &s.id == id));
+        let win = self.wake.content_rect().size();
+        let resized = win != self.web_win;
+        self.web_win = win;
         for s in slots {
             if s.url.trim().is_empty() {
                 continue;
@@ -1413,7 +1608,7 @@ impl App {
                         let _ = w.view.load_url(&url);
                         w.url = url;
                     }
-                    if w.rect != s.rect {
+                    if w.rect != s.rect || (resized && cfg!(target_os = "macos")) {
                         let _ = w.view.set_bounds(bounds);
                         w.rect = s.rect;
                     }
@@ -1527,7 +1722,8 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         if !self.titlebar_done {
             // 창이 만들어진 뒤에야 적용되므로 될 때까지 시도한다.
-            self.titlebar_done = sys::dark_titlebar(title(), (16, 17, 19), (138, 139, 145));
+            let (bg, dim) = (ui::BG(), ui::DIM());
+            self.titlebar_done = sys::dark_titlebar(title(), (bg.r(), bg.g(), bg.b()), (dim.r(), dim.g(), dim.b()), !ui::is_light());
         }
         if let Some(at) = self.react_at {
             if !self.busy && std::time::Instant::now() >= at {
@@ -1549,7 +1745,9 @@ impl eframe::App for App {
             }
         }
         // 맡긴 작업이 끝났으면, 사용자가 말하고 있지 않을 때 그 결과를 화면에 정리하는 턴을 돈다.
-        if !self.job_news.is_empty() {
+        if self.standby {
+            // 기다리는 중에는 작업 결과 정리나 구성 정리를 하지 않는다 (부르면 그때 한다).
+        } else if !self.job_news.is_empty() {
             let quiet = !self.busy && self.react_at.is_none() && !talking && self.stt.is_none() && !(self.mic.is_some() && self.heard);
             if quiet && self.input.trim().is_empty() && self.idle_since.elapsed().as_millis() > 700 {
                 self.start_turn(&ctx, String::new());
@@ -1593,7 +1791,7 @@ impl eframe::App for App {
         self.chat_panel(ui, &ctx, talking);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(ui::BG).inner_margin(egui::Margin { left: 18, right: 18, top: 18, bottom: 0 }))
+            .frame(egui::Frame::new().fill(ui::BG()).inner_margin(egui::Margin { left: 18, right: 18, top: 18, bottom: 0 }))
             .show(ui, |ui| {
                 let mut lines = Vec::new();
                 let mut clicked = None;
@@ -1624,20 +1822,31 @@ impl eframe::App for App {
 
 fn setup_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    let candidates = ["C:\\Windows\\Fonts\\malgun.ttf", "/System/Library/Fonts/Supplemental/AppleGothic.ttf"];
-    for path in candidates {
-        if let Ok(bytes) = std::fs::read(path) {
-            fonts.font_data.insert("kr".into(), Arc::new(egui::FontData::from_owned(bytes)));
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-                fonts.families.entry(family).or_default().insert(0, "kr".into());
-            }
-            break;
+    // (파일, 묶음 파일 안의 번호). Mac 의 Apple SD Gothic Neo 는 한 파일(.ttc)에 굵기별로 들어 있다: 0 보통, 6 굵게.
+    let load = |list: &[(&str, u32)]| {
+        list.iter().find_map(|(path, index)| {
+            let bytes = std::fs::read(path).ok()?;
+            let mut data = egui::FontData::from_owned(bytes);
+            data.index = *index;
+            Some(data)
+        })
+    };
+    let regular = [
+        ("C:\\Windows\\Fonts\\malgun.ttf", 0),
+        ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 0),
+        ("/System/Library/Fonts/Supplemental/AppleGothic.ttf", 0),
+    ];
+    let heavy = [("C:\\Windows\\Fonts\\malgunbd.ttf", 0), ("/System/Library/Fonts/AppleSDGothicNeo.ttc", 6)];
+    if let Some(data) = load(&regular) {
+        fonts.font_data.insert("kr".into(), Arc::new(data));
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            fonts.families.entry(family).or_default().insert(0, "kr".into());
         }
     }
     // 제목과 숫자에 쓰는 굵은 글꼴. 없으면 보통 글꼴로 대신한다.
     let mut bold = fonts.families.get(&egui::FontFamily::Proportional).cloned().unwrap_or_default();
-    if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\malgunbd.ttf") {
-        fonts.font_data.insert("kr-bold".into(), Arc::new(egui::FontData::from_owned(bytes)));
+    if let Some(data) = load(&heavy) {
+        fonts.font_data.insert("kr-bold".into(), Arc::new(data));
         bold.insert(0, "kr-bold".into());
     }
     fonts.families.insert(egui::FontFamily::Name("bold".into()), bold);
@@ -1661,15 +1870,146 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);
-            cc.egui_ctx.set_theme(egui::Theme::Dark);
-            cc.egui_ctx.style_mut_of(egui::Theme::Dark, |s| {
-                s.visuals.selection.bg_fill = egui::Color32::from_rgb(70, 71, 77);
-                s.visuals.selection.stroke = egui::Stroke::new(1.0, ui::DIM);
-                s.visuals.text_cursor.stroke = egui::Stroke::new(1.5, ui::TEXT);
-            });
+            sys::load_language();
+            // 저장해 둔 선택이 없으면 OS 설정(밝게/어둡게)을 따른다.
+            let light = match std::fs::read_to_string(theme_path()).map(|s| s.trim().to_string()).as_deref() {
+                Ok("light") => true,
+                Ok("dark") => false,
+                _ => cc.egui_ctx.system_theme() == Some(egui::Theme::Light),
+            };
+            set_theme(&cc.egui_ctx, light, false);
             Ok(Box::new(App::new(&cc.egui_ctx)))
         }),
     )
+}
+
+/// 말을 멈추라는 짧은 말인가 ("그만", "멈춰", "스톱", "조용히 해" 등).
+fn is_stop_word(text: &str) -> bool {
+    let t: String = text.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    if t.is_empty() || t.chars().count() > 10 {
+        return false;
+    }
+    ["그만", "멈춰", "멈춰요", "멈춤", "스톱", "stop", "조용", "쉿", "됐어", "됐다", "닥쳐", "그만해", "그만하라고", "shutup", "quiet", "enough", "thatsenough"].iter().any(|w| t.contains(w))
+}
+
+/// 잠시 기다려 달라는 말인가 ("잠깐만", "기다려 봐", "확인해 볼게", "읽어 볼게").
+fn is_wait_word(text: &str) -> bool {
+    let t: String = text.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    if t.is_empty() || t.chars().count() > 20 {
+        return false;
+    }
+    // "잠깐, 이거 찾아봐"처럼 시키는 말은 기다리라는 말이 아니다.
+    if ["줘", "찾아봐", "해봐", "알려", "보여", "만들어", "가져와", "써봐", "봐봐", "find", "show", "tellme", "make", "search", "get"].iter().any(|w| t.contains(w)) {
+        return false;
+    }
+    ["잠깐", "잠시만", "기다려", "기다리", "볼게", "볼께", "보고올게", "체크해볼", "생각좀", "생각해볼", "holdon", "wait", "onesec", "onesecond", "letmecheck", "letmeread", "letmethink", "justasec"].iter().any(|w| t.contains(w))
+}
+
+/// 기다리는 중에 분명히 나를 부르는 말인가 ("알리", "다 봤어", "이제 얘기해").
+fn is_wake_word(text: &str) -> bool {
+    let t: String = text.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    // 영어 이름은 낱말 하나로 들렸을 때만 (quality, Italian 같은 낱말 속의 ali 는 아니다).
+    if text.split(|c: char| !c.is_alphanumeric()).any(|w| w.eq_ignore_ascii_case("ali")) {
+        return true;
+    }
+    ["알리", "다봤어", "다했어", "다읽었어", "확인했어", "이제얘기해", "이제말해", "얘기해봐", "말해봐", "됐어이제", "자이제", "돌아왔어", "imback", "imdone", "okaydone", "allright", "goahead", "youthere"].iter().any(|w| t.contains(w))
+}
+
+/// 두 글이 거의 같은가 (두 글자 묶음이 얼마나 겹치는가). AI 자기 목소리를 받아쓴 것을 가려낼 때 쓴다.
+fn similar(a: &str, b: &str) -> bool {
+    let grams = |s: &str| {
+        let c: Vec<char> = s.chars().filter(|c| c.is_alphanumeric()).collect();
+        c.windows(2).map(|w| (w[0], w[1])).collect::<std::collections::HashSet<_>>()
+    };
+    let (ga, gb) = (grams(a), grams(b));
+    if gb.len() < 3 {
+        return false;
+    }
+    let common = gb.iter().filter(|g| ga.contains(g)).count();
+    common as f32 / gb.len() as f32 > 0.6
+}
+
+/// 한 턴에 걸린 시간. 턴이 끝나면 data/timing.jsonl 에 한 줄로 남긴다 (밀리초, 턴 시작부터).
+#[derive(Default)]
+struct TurnTiming {
+    /// 받아쓰기 (걸린 시간, 소리 길이 초) - 말로 한 턴일 때
+    stt: Option<(u64, f32)>,
+    /// 판단 모델의 결정이 도착한 때
+    pre_ms: Option<u64>,
+    /// 화면에 첫 출력이 나온 때
+    first_ms: Option<u64>,
+    /// 첫 소리를 내기 시작한 때
+    first_voice: Option<u64>,
+    /// 도구 (무엇, 시작, 걸린 시간)
+    tools: Vec<(String, u64, u64)>,
+    open: Option<(String, u64)>,
+    stats: Option<llm::Stats>,
+}
+
+impl TurnTiming {
+    fn mark_first(&mut self, start: std::time::Instant) {
+        self.first_ms.get_or_insert(start.elapsed().as_millis() as u64);
+    }
+
+    /// 도구 표시가 바뀔 때마다 부른다: 앞 도구를 닫고 새 도구를 연다.
+    fn activity(&mut self, what: &str, start: std::time::Instant) {
+        let now = start.elapsed().as_millis() as u64;
+        if let Some((w, t)) = self.open.take() {
+            self.tools.push((w, t, now - t));
+        }
+        if !what.is_empty() {
+            self.open = Some((what.to_string(), now));
+        }
+    }
+
+    fn write(&mut self, input: &str, start: std::time::Instant, voice: bool, spoken: &[String], error: Option<&str>) {
+        self.activity("", start);
+        let total = start.elapsed().as_millis() as u64;
+        let (date, time) = sys::now_local();
+        let s = self.stats.clone().unwrap_or_default();
+        let line = serde_json::json!({
+            "at": format!("{date} {time}"),
+            "input": input.chars().take(200).collect::<String>(),
+            "voice": voice,
+            "stt_ms": self.stt.map(|x| x.0),
+            "speech_secs": self.stt.map(|x| (x.1 * 10.0).round() / 10.0),
+            "pre_ms": self.pre_ms,
+            "first_screen_ms": self.first_ms,
+            "first_voice_ms": self.first_voice,
+            "total_ms": total,
+            "model": s.model,
+            "api_first_ms": s.first_ms,
+            "tokens": { "input": s.input_tokens, "cached": s.cached_tokens, "output": s.output_tokens },
+            "tools": self.tools.iter().map(|(w, t, d)| serde_json::json!({ "what": w, "at_ms": t, "ms": d })).collect::<Vec<_>>(),
+            "spoken": spoken,
+            "error": error,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(sys::data_dir().join("timing.jsonl")) {
+            use std::io::Write;
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
+fn theme_path() -> std::path::PathBuf {
+    sys::data_dir().join("theme.txt")
+}
+
+/// 밝은 화면과 어두운 화면을 바꾼다. `save` 면 다음 실행에도 그대로 쓰도록 남긴다.
+pub fn set_theme(ctx: &egui::Context, light: bool, save: bool) {
+    ui::set_light(light);
+    let theme = if light { egui::Theme::Light } else { egui::Theme::Dark };
+    ctx.set_theme(theme);
+    ctx.style_mut_of(theme, |s| {
+        s.visuals.selection.bg_fill = if light { egui::Color32::from_rgb(196, 214, 240) } else { egui::Color32::from_rgb(70, 71, 77) };
+        s.visuals.selection.stroke = egui::Stroke::new(1.0, ui::DIM());
+        s.visuals.text_cursor.stroke = egui::Stroke::new(1.5, ui::TEXT());
+    });
+    // Mac 의 창 제목 줄도 같이 바꾼다.
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if light { egui::SystemTheme::Light } else { egui::SystemTheme::Dark }));
+    if save {
+        let _ = std::fs::write(theme_path(), if light { "light" } else { "dark" });
+    }
 }
 
 /// 화면 그림을 24비트 BMP 로 저장한다 (확인용. 외부 라이브러리 없이 쓸 수 있는 가장 단순한 그림 형식).
@@ -1696,4 +2036,42 @@ fn save_bmp(path: &str, img: &egui::ColorImage) {
         out.resize(start + row, 0);
     }
     let _ = std::fs::write(path, out);
+}
+
+#[cfg(test)]
+mod voice_tests {
+    use super::{is_stop_word, similar};
+
+    #[test]
+    fn stop_words() {
+        for w in ["그만.", "그만해!", "멈춰", "스톱", "조용히 해", "Stop.", "말 그만하라고"] {
+            assert!(is_stop_word(w), "{w}");
+        }
+        for w in ["그만 찾고 다른 걸 보여줘 공모전 말고", "이 영상 만들 수 있어?", ""] {
+            assert!(!is_stop_word(w), "{w}");
+        }
+    }
+
+    #[test]
+    fn wait_words() {
+        use super::{is_wait_word, is_wake_word};
+        for w in ["잠깐만.", "잠깐 기다려 봐", "내가 확인해 볼게", "이거 읽어 볼게요", "잠시만요"] {
+            assert!(is_wait_word(w), "{w}");
+        }
+        for w in ["잠깐, 이거 찾아봐", "잠깐만 그거 보여줘", "공모전 조사해 줘"] {
+            assert!(!is_wait_word(w), "{w}");
+        }
+        assert!(is_wake_word("알리, 다 봤어"));
+        assert!(!is_wake_word("여기 마감이 언제지"));
+        assert!(is_wake_word("Ali, I'm back"));
+        assert!(!is_wake_word("the quality is bad"));
+        assert!(is_wait_word("Hold on."));
+        assert!(!is_wait_word("wait, find the deadline"));
+    }
+
+    #[test]
+    fn own_voice() {
+        assert!(similar("되감기 여행 구성을 그림으로 보여 드릴게요.", "되감기 여행 구성을 그림으로 보여드릴게요"));
+        assert!(!similar("되감기 여행 구성을 그림으로 보여 드릴게요.", "한국 손에서 클로즈업 뭔 소리야"));
+    }
 }

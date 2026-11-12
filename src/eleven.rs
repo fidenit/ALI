@@ -112,6 +112,8 @@ pub fn transcribe(pcm: &[i16]) -> Result<String, String> {
         field("model_id", model);
         field("file_format", "pcm_s16le_16");
         field("tag_audio_events", "false");
+        // 고른 대화 언어로 받아쓴다 (짧은 말에서 언어를 잘못 짐작하는 일을 막는다).
+        field("language_code", if crate::sys::english() { "eng" } else { "kor" });
         body.extend_from_slice(
             format!("--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"speech.pcm\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes(),
         );

@@ -169,6 +169,40 @@ pub fn definitions(worker: bool) -> Value {
         ),
         tool("job_list", "맡긴 작업들의 상태를 본다.", json!({}), &[]),
         tool(
+            "contact_find",
+            "연락처 앱에서 이름(일부)으로 사람과 전화번호를 찾는다 (Mac).",
+            json!({ "query": { "type": "string", "description": "이름 또는 이름의 일부" } }),
+            &["query"],
+        ),
+        tool(
+            "message_send",
+            "문자를 보낼 준비를 한다 (Mac 메시지 앱, 아이폰의 문자 전달이 켜져 있으면 내 번호로 일반 문자). 바로 보내지지 않는다: 결과로 오는 확인 카드 명령을 화면에 내면, 사용자가 '보내기'를 눌렀을 때 프로그램이 보낸다.",
+            json!({
+                "to": { "type": "string", "description": "받는 사람 이름(연락처에서 찾는다) 또는 전화번호" },
+                "text": { "type": "string", "description": "보낼 내용" },
+                "topic": { "type": "string", "description": "확인 카드를 놓을 주제 ID (생략하면 msg)" },
+            }),
+            &["to", "text"],
+        ),
+        tool(
+            "phone_call",
+            "아이폰을 통해 전화를 걸 준비를 한다 (통화는 사용자가 한다). 바로 걸리지 않는다: 결과로 오는 확인 카드 명령을 화면에 내면, 사용자가 '걸기'를 눌렀을 때 걸린다.",
+            json!({
+                "to": { "type": "string", "description": "이름(연락처에서 찾는다) 또는 전화번호" },
+                "topic": { "type": "string", "description": "확인 카드를 놓을 주제 ID (생략하면 msg)" },
+            }),
+            &["to"],
+        ),
+        tool(
+            "message_read",
+            "최근에 주고받은 문자를 읽는다 (Mac 메시지 앱의 기록). who 를 주면 그 사람과의 문자만.",
+            json!({
+                "who": { "type": "string", "description": "이름 또는 전화번호 (생략하면 전체)" },
+                "limit": { "type": "integer", "description": "몇 개까지 (기본 30)" },
+            }),
+            &[],
+        ),
+        tool(
             "job_tell",
             "진행 중인 작업자에게 추가 지시나 사용자의 답을 전한다.",
             json!({ "id": { "type": "string", "description": "작업 ID (예: job3)" }, "message": { "type": "string" } }),
@@ -190,7 +224,11 @@ pub fn definitions(worker: bool) -> Value {
     ]);
     // 작업자는 화면과 브라우저를 직접 다루지 않고, 일을 다시 남에게 맡기지도 않는다. 메인은 progress 를 쓰지 않는다.
     let keep = |name: &str| {
-        if worker { !(name == "screen" || name == "board_read" || name == "route_find" || name.starts_with("browser_") || name.starts_with("job_")) } else { name != "progress" }
+        if worker {
+            !(name == "screen" || name == "board_read" || name == "route_find" || name.starts_with("browser_") || name.starts_with("job_") || name == "message_send" || name == "phone_call")
+        } else {
+            name != "progress"
+        }
     };
     Value::Array(all.as_array().unwrap().iter().filter(|t| keep(t["name"].as_str().unwrap_or(""))).cloned().collect())
 }
@@ -239,6 +277,10 @@ pub fn describe(name: &str, input: &Value) -> String {
         "browser_eval" => format!("페이지 조작: {}", short("script")),
         "web_search" => format!("웹 검색: {}", short("query")),
         "web_fetch" => format!("웹 페이지 읽기: {}", short("url")),
+        "contact_find" => format!("연락처 찾기: {}", short("query")),
+        "message_send" => format!("문자 준비: {}", short("to")),
+        "phone_call" => format!("전화 준비: {}", short("to")),
+        "message_read" => "문자 읽기".to_string(),
         other => other.to_string(),
     }
 }
@@ -330,6 +372,10 @@ pub fn execute(name: &str, input: &Value) -> (String, bool) {
             Ok(format!("{}\n(총 {total}건)", hits.join("\n")))
         }
         "route_find" => crate::route::find(input),
+        "contact_find" => crate::phone::find(arg(input, "query")?),
+        "message_send" => crate::phone::prepare_message(arg(input, "to")?, arg(input, "text")?, input["topic"].as_str().unwrap_or("msg")),
+        "phone_call" => crate::phone::prepare_call(arg(input, "to")?, input["topic"].as_str().unwrap_or("msg")),
+        "message_read" => crate::phone::read(input["who"].as_str().unwrap_or(""), input["limit"].as_u64().unwrap_or(30) as usize),
         "place_find" => {
             let query = arg(input, "query")?;
             let encoded: String = query.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();

@@ -2,6 +2,7 @@
 //! OS 에 들어 있는 음성을 쓴다 (Windows: SAPI 한국어 음성, Mac: say 명령).
 //! 더 좋은 음성 엔진으로 바꿀 때는 이 파일만 바꾸면 된다.
 
+#[cfg(windows)]
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -142,8 +143,15 @@ fn speak_blocking(child: &Arc<Mutex<Option<Child>>>, text: &str) {
 
 #[cfg(not(windows))]
 fn speak_blocking(child: &Arc<Mutex<Option<Child>>>, text: &str) {
-    // Mac: 문장마다 say 를 실행한다.
-    let spawned = Command::new("say").args(["-r", "210", text]).stdin(Stdio::null()).spawn();
+    // Mac: 문장마다 say 를 실행한다. 한글이 있으면 한국어 목소리로 읽는다 (시스템 기본 목소리가 영어일 수 있다).
+    let mut cmd = Command::new("say");
+    cmd.args(["-r", "210"]);
+    if text.chars().any(|c| ('\u{AC00}'..='\u{D7A3}').contains(&c)) {
+        if let Some(v) = korean_voice() {
+            cmd.args(["-v", v]);
+        }
+    }
+    let spawned = cmd.arg(text).stdin(Stdio::null()).spawn();
     let Ok(c) = spawned else { return };
     *child.lock().unwrap() = Some(c);
     loop {
@@ -157,6 +165,25 @@ fn speak_blocking(child: &Arc<Mutex<Option<Child>>>, text: &str) {
             }
         }
     }
+}
+
+/// 설치된 한국어 목소리 하나 (유나가 있으면 유나). 처음 한 번만 찾는다.
+#[cfg(not(windows))]
+fn korean_voice() -> Option<&'static str> {
+    static VOICE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VOICE
+        .get_or_init(|| {
+            let out = Command::new("say").args(["-v", "?"]).output().ok()?;
+            let list = String::from_utf8_lossy(&out.stdout).to_string();
+            let names: Vec<String> = list
+                .lines()
+                .filter(|l| l.contains("ko_KR"))
+                .filter_map(|l| l.split("ko_KR").next())
+                .map(|n| n.trim().to_string())
+                .collect();
+            names.iter().find(|n| n.starts_with("Yuna")).or(names.first()).cloned()
+        })
+        .as_deref()
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]

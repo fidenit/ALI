@@ -9,6 +9,16 @@ pub fn base_dir() -> PathBuf {
     let exe = std::env::current_exe().unwrap_or_default();
     let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
     let name = |p: &PathBuf| p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    // Mac 의 .app 묶음: 실행 파일은 ALI.app/Contents/MacOS 안에 있다. 키와 data, vault 는 ALI.app 옆에 둔다.
+    if name(&dir) == "MacOS" {
+        if let Some(app) = dir.parent().and_then(|c| c.parent()) {
+            if app.extension().map(|e| e == "app").unwrap_or(false) {
+                if let Some(outer) = app.parent() {
+                    return outer.to_path_buf();
+                }
+            }
+        }
+    }
     if matches!(name(&dir).as_str(), "release" | "debug") {
         if let Some(target) = dir.parent().map(PathBuf::from) {
             if name(&target) == "target" {
@@ -19,6 +29,27 @@ pub fn base_dir() -> PathBuf {
         }
     }
     dir
+}
+
+/// 대화 언어가 영어인가. 처음에는 한국어, 바꾸면 data/lang.txt 에 남는다.
+static ENGLISH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn english() -> bool {
+    ENGLISH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// 대화 언어를 정한다. `save` 면 다음 실행에도 그대로 쓴다.
+pub fn set_english(on: bool, save: bool) {
+    ENGLISH.store(on, std::sync::atomic::Ordering::Relaxed);
+    if save {
+        let _ = std::fs::write(data_dir().join("lang.txt"), if on { "en" } else { "ko" });
+    }
+}
+
+/// 저장해 둔 대화 언어를 읽는다.
+pub fn load_language() {
+    let en = std::fs::read_to_string(data_dir().join("lang.txt")).map(|s| s.trim() == "en").unwrap_or(false);
+    set_english(en, false);
 }
 
 pub fn data_dir() -> PathBuf {
@@ -64,7 +95,7 @@ pub fn now_local() -> (String, String) {
 /// 창 상단바를 앱 배경과 같은 색으로 맞춘다. 성공하면 true.
 /// 상단바 자체는 OS 것을 그대로 쓰므로 끌기, 최대화, 화면 분할 같은 동작은 그대로다.
 #[cfg(windows)]
-pub fn dark_titlebar(title: &str, rgb: (u8, u8, u8), text_rgb: (u8, u8, u8)) -> bool {
+pub fn dark_titlebar(title: &str, rgb: (u8, u8, u8), text_rgb: (u8, u8, u8), dark: bool) -> bool {
     use std::ffi::c_void;
     #[link(name = "user32")]
     unsafe extern "system" {
@@ -82,7 +113,7 @@ pub fn dark_titlebar(title: &str, rgb: (u8, u8, u8), text_rgb: (u8, u8, u8)) -> 
             return false;
         }
         let set = |attr: u32, v: u32| DwmSetWindowAttribute(hwnd, attr, &v as *const u32 as *const c_void, 4);
-        set(20, 1); // 어두운 상단바 (Windows 10 20H1 이상)
+        set(20, dark as u32); // 어두운 상단바 (Windows 10 20H1 이상)
         set(35, colorref(rgb)); // 상단바 색 (Windows 11)
         set(36, colorref(text_rgb)); // 상단바 글자 색
         set(34, colorref(rgb)); // 창 테두리 색
@@ -91,8 +122,8 @@ pub fn dark_titlebar(title: &str, rgb: (u8, u8, u8), text_rgb: (u8, u8, u8)) -> 
 }
 
 #[cfg(not(windows))]
-pub fn dark_titlebar(_title: &str, _rgb: (u8, u8, u8), _text_rgb: (u8, u8, u8)) -> bool {
-    true // Mac 은 시스템 설정(다크 모드)을 따른다
+pub fn dark_titlebar(_title: &str, _rgb: (u8, u8, u8), _text_rgb: (u8, u8, u8), _dark: bool) -> bool {
+    true // Mac 은 set_theme 에서 창의 모양(밝게/어둡게)을 바꾼다
 }
 
 fn percent_encode(s: &str) -> String {

@@ -16,9 +16,15 @@ Rust로 만든 네이티브 프로그램이고, Claude API를 HTTP로 직접 부
 
 ## 받아서 쓰기 (Windows)
 
-[Releases](https://github.com/fidenit/ALI/releases)에서 `ALI-…-windows-x64.zip`을 받아 풀고 `ali.exe`를 실행한다. 설치는 없다. 처음 실행하면 Claude API 키를 넣는 칸이 나온다. 자세한 것은 묶음 안의 `읽어보기.txt`. macOS 용은 아직 없다 (빌드해 본 적이 없다).
+[Releases](https://github.com/fidenit/ALI/releases)에서 `ALI-…-windows-x64.zip`을 받아 풀고 `ali.exe`를 실행한다. 설치는 없다. 처음 실행하면 Claude API 키를 넣는 칸이 나온다. 자세한 것은 묶음 안의 `읽어보기.txt`.
+
+## Mac
+
+아직 받아 쓰는 묶음은 없다. 직접 빌드한다 (아래). `./run.sh pack`이 `portable/ALI/ALI.app`을 만든다. 키 파일과 `data/`, `vault/`는 `ALI.app` 옆에 둔다. 서명은 임시 서명(ad-hoc)뿐이라, 다른 Mac으로 옮기면 처음 한 번은 Finder에서 오른쪽 클릭 → 열기로 연다. 인터넷에서 받은 경우 `xattr -dr com.apple.quarantine ALI.app`이 필요할 수 있다.
 
 ## 직접 빌드해서 실행
+
+Windows:
 
 ```powershell
 .\run.ps1          # 빌드해서 실행
@@ -26,7 +32,15 @@ Rust로 만든 네이티브 프로그램이고, Claude API를 HTTP로 직접 부
 .\run.ps1 pack     # 들고 다닐 수 있는 폴더 portable\ALI 만들기
 ```
 
-빌드에는 Rust(`stable-x86_64-pc-windows-gnu`)와 MinGW(WinLibs)가 필요하다. 실행 파일 옆에 `WebView2Loader.dll`이 있어야 뜬다(`run.ps1`이 복사한다).
+Mac (Rust는 [rustup](https://rustup.rs)으로 설치, Xcode 명령줄 도구 필요):
+
+```sh
+./run.sh            # 빌드해서 실행
+./run.sh test       # 테스트
+./run.sh pack       # portable/ALI/ALI.app 만들기
+```
+
+Windows 빌드에는 Rust(`stable-x86_64-pc-windows-gnu`)와 MinGW(WinLibs)가 필요하다. 실행 파일 옆에 `WebView2Loader.dll`이 있어야 뜬다(`run.ps1`이 복사한다).
 
 ## 키
 
