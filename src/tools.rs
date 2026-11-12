@@ -8,6 +8,20 @@ use serde_json::{Value, json};
 
 use crate::vault;
 
+thread_local! {
+    /// 이 스레드에서 도는 턴을 사용자가 멈추라고 했는지 보는 신호 (메인 턴의 스레드에만 걸린다)
+    static STOP: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_stop(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    STOP.with(|s| *s.borrow_mut() = Some(flag));
+}
+
+/// 사용자가 지금 턴을 멈추라고 했는가.
+pub fn stopped() -> bool {
+    STOP.with(|s| s.borrow().as_ref().map(|f| f.load(std::sync::atomic::Ordering::Relaxed)).unwrap_or(false))
+}
+
 const SHELL_NOTE: &str = if cfg!(windows) { "Windows PowerShell 5.1" } else { "sh" };
 
 /// API 에 보내는 도구 정의. 순서와 내용이 바뀌면 캐시가 깨지므로 고정해 둔다.
@@ -392,7 +406,7 @@ pub fn shell(command: &str, cwd: Option<&str>, timeout_sec: u64) -> Result<Strin
     let status = loop {
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(s) => break Some(s),
-            None if started.elapsed() > limit => {
+            None if started.elapsed() > limit || stopped() => {
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -409,6 +423,7 @@ pub fn shell(command: &str, cwd: Option<&str>, timeout_sec: u64) -> Result<Strin
     match status {
         Some(s) if s.success() => Ok(text),
         Some(s) => Err(format!("{text}\n[종료 코드 {}]", s.code().unwrap_or(-1))),
+        None if stopped() => Err(format!("{text}\n[사용자가 멈춰서 중단함]")),
         None => Err(format!("{text}\n[{timeout_sec}초 제한 시간 초과로 중단함]")),
     }
 }

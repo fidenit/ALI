@@ -150,6 +150,10 @@ struct App {
     fake_frame: usize,
     /// 답하는 중에 사용자가 더 적은 말. 도구를 쓰는 사이에 모델에게 전해지고, 그 전에 턴이 끝나면 다음 턴으로 간다.
     pub queue: Arc<std::sync::Mutex<Vec<String>>>,
+    /// 지금 도는 턴을 멈추라는 신호
+    pub stop: Arc<std::sync::atomic::AtomicBool>,
+    /// 이번 턴에 AI 가 한마디(say)를 했는가
+    pub turn_said: bool,
     /// 초기화를 한 번 눌러 확인을 기다리는 중이면 그 시각
     pub reset_armed: Option<std::time::Instant>,
     /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
@@ -263,6 +267,8 @@ impl App {
             task_topic: None,
             pics: Vec::new(),
             reset_armed: None,
+            stop: Default::default(),
+            turn_said: false,
             queue: Default::default(),
             fake_input: Default::default(),
             fake_marks: Default::default(),
@@ -430,6 +436,9 @@ impl App {
                 }
                 // AI 가 어떤 카드를 건드렸으면, 그 카드의 주제가 화면에 보이게 한다.
                 if by == Author::Ai {
+                    if line.trim_start().starts_with("say ") {
+                        self.turn_said = true;
+                    }
                     let mut words = line.split_whitespace();
                     let (cmd, id) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
                     // 웹 카드는 제 크기로 화면 안에 다 들어와야 페이지가 보인다. 만들거나 주소를 바꾸면 그렇게 보이는 자리로 간다.
@@ -841,7 +850,9 @@ impl App {
             recall: std::mem::take(&mut self.recall_cands),
         };
         let ctx = ctx.clone();
-        llm::run_turn(self.cfg.clone(), text, images, self.queue.clone(), pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
+        self.stop = Default::default();
+        self.turn_said = false;
+        llm::run_turn(self.cfg.clone(), text, images, self.queue.clone(), self.stop.clone(), pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
         self.turn_no += 1;
     }
 
@@ -1098,10 +1109,15 @@ impl App {
                 }
                 llm::Msg::Pre(p) => {
                     // 음성 대화에서는 판단 모델의 결정이 나오자마자(약 0.2초) 먼저 대답한다.
-                    if let Some(ack) = p.ack.clone().filter(|_| self.voice) {
-                        self.tts.speak(&ack);
-                        self.caption = Some(ack.clone());
-                        self.turn_spoken.push(ack);
+                    if let Some(ack) = p.ack.clone() {
+                        if self.voice {
+                            self.tts.speak(&ack);
+                            self.caption = Some(ack.clone());
+                            self.turn_spoken.push(ack);
+                        } else if !self.turn_said {
+                            // 글로 대화할 때도 받았다는 대답을 먼저 보여 준다. AI 의 한마디가 오면 그것으로 바뀐다.
+                            self.say_live = Some(ack);
+                        }
                     }
                     self.pre = Some(p);
                 }
@@ -1193,6 +1209,12 @@ impl App {
                 }
                 llm::Msg::Done(stats) => {
                     self.stats = Some(stats);
+                    self.finish_turn();
+                }
+                llm::Msg::Error(e) if e == agent::STOPPED => {
+                    // 사용자가 멈춘 것은 오류가 아니다.
+                    self.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                    self.apply_line("say 멈췄어요.", Author::Ai);
                     self.finish_turn();
                 }
                 llm::Msg::Error(e) => {

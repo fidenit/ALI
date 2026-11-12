@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 use crate::llm::{Config, Msg, Stats};
 
 const SYSTEM: &str = include_str!("prompt.md");
+/// 사용자가 멈춰서 턴이 끝났다는 표시
+pub const STOPPED: &str = "__stopped";
 const URL: &str = "https://api.anthropic.com/v1/messages";
 /// 한 턴에서 도구를 주고받는 횟수의 상한
 const MAX_STEPS: usize = 80;
@@ -89,8 +91,8 @@ struct Reply {
 
 /// `images` 는 사용자가 이번 말에 붙인 사진 (형식, base64).
 /// `added` 는 일하는 도중에 사용자가 덧붙인 말을 꺼내 오는 함수 (없으면 None). 도구를 한 차례 쓴 뒤마다 불린다.
-pub fn run(cfg: &Config, key: &str, turn_text: &str, images: &[(String, String)], added: &dyn Fn() -> Option<String>, send: &dyn Fn(Msg)) -> Result<Stats, String> {
-    let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| Ok(added()), tool: &|_, _| None };
+pub fn run(cfg: &Config, key: &str, turn_text: &str, images: &[(String, String)], added: &dyn Fn() -> Result<Option<String>, String>, send: &dyn Fn(Msg)) -> Result<Stats, String> {
+    let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| added(), tool: &|_, _| None };
     run_as(cfg, key, &role, turn_text, images, send).map(|(stats, _)| stats)
 }
 
@@ -250,6 +252,9 @@ fn stream_once(
     let reader = BufReader::new(resp.into_body().into_reader());
     for line in reader.lines() {
         let line = line.map_err(|e| format!("스트림 끊김: {e}"))?;
+        if crate::tools::stopped() {
+            return Err(STOPPED.into());
+        }
         let Some(data) = line.strip_prefix("data:") else { continue };
         let Ok(v) = serde_json::from_str::<Value>(data.trim()) else { continue };
         let idx = v["index"].as_u64().unwrap_or(0) as usize;

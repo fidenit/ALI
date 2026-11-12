@@ -1,4 +1,4 @@
-//! 한 턴을 별도 스레드에서 돌리고, 일어나는 일을 화면 쪽으로 넘긴다.
+﻿//! 한 턴을 별도 스레드에서 돌리고, 일어나는 일을 화면 쪽으로 넘긴다.
 //! 실제 호출과 도구 실행은 agent.rs 에 있다. API 키가 없으면 같은 경로로 시연 대본을 흘려보낸다.
 
 use std::sync::mpsc::Sender;
@@ -78,19 +78,21 @@ pub struct PreInput {
     pub notes: Vec<(String, String)>,
     pub recent: String,
     /// 음성이 켜져 있는가
+    #[allow(dead_code)]
     pub voice: bool,
     /// 이번 말과 글자가 겹치는 옛 대화 후보 (점수, 턴 번호, 내용)
     pub recall: Vec<(f32, usize, String)>,
 }
 
 /// 한 턴을 별도 스레드에서 실행한다. `wake` 는 화면을 다시 그리게 깨우는 함수.
-pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>, pre: PreInput, turn_no: usize, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
+pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>, stop: std::sync::Arc<std::sync::atomic::AtomicBool>, pre: PreInput, turn_no: usize, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         let send = |m: Msg| {
             let _ = tx.send(m);
             wake();
         };
         let (mut cfg, mut turn_text) = (cfg, turn_text);
+        crate::tools::set_stop(stop.clone());
         // 메인 모델보다 먼저: 판단 모델이 요청의 종류, 주제, 필요한 생각의 깊이, 필요한 기억을 정한다.
         if !cfg.demo() && !pre.input.is_empty() {
             if let Some(p) = crate::decide::before(&pre.input, &pre.topics, &pre.notes, &pre.recent) {
@@ -108,10 +110,7 @@ pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, q
                     turn_text += &format!("\n<notes>\n{loaded}</notes>");
                 }
                 // 음성 대화: 답을 기다리는 동안 먼저 대답한다. 메인 모델에게는 이미 한 말을 알려서 같은 인사를 되풀이하지 않게 한다.
-                let mut p = p;
-                if !pre.voice {
-                    p.ack = None;
-                }
+                let p = p;
                 if let Some(ack) = &p.ack {
                     turn_text += &format!("\n<already_said>{ack}</already_said>");
                 }
@@ -129,13 +128,16 @@ pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, q
             Some(key) => {
                 // 답하는 중에 사용자가 더 적은 말: 도구를 쓰는 사이사이에 꺼내서 모델에게 전한다.
                 let added = || {
+                    if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(crate::agent::STOPPED.to_string());
+                    }
                     let said: Vec<String> = queue.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
                     if said.is_empty() {
-                        return None;
+                        return Ok(None);
                     }
                     let text = format!("<added>\n{}\n</added>", said.join("\n"));
                     send(Msg::Added(said));
-                    Some(text)
+                    Ok(Some(text))
                 };
                 crate::agent::run(&cfg, key, &turn_text, &images, &added, &send)
             }

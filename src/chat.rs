@@ -29,6 +29,34 @@ fn switch(ui: &mut egui::Ui, ctx: &egui::Context, id: &str, label: &str, on: boo
 
 use eframe::egui::Rect;
 
+/// 도구가 하는 일을 사용자가 알아볼 말로 바꾼다. 명령어나 긴 경로를 그대로 보여 주지 않는다.
+fn plain(activity: &str) -> String {
+    let (kind, detail) = activity.split_once(": ").unwrap_or((activity, ""));
+    // 경로는 파일 이름만
+    let name = detail.trim_end_matches('…').rsplit(['\\', '/']).next().unwrap_or("").trim();
+    let short = |s: &str| s.chars().take(24).collect::<String>();
+    let with = |what: &str, extra: &str| if extra.is_empty() { what.to_string() } else { format!("{what} · {}", short(extra)) };
+    match kind {
+        "명령 실행" => "컴퓨터에서 작업하는 중".to_string(),
+        "파일 읽기" => with("파일을 읽는 중", name),
+        "파일 쓰기" => with("파일을 만드는 중", name),
+        "파일 고치기" => with("파일을 고치는 중", name),
+        "폴더 보기" => with("폴더를 살펴보는 중", name),
+        "글자 찾기" => "파일에서 찾는 중".to_string(),
+        "기억 찾기" | "기억 읽기" => "기억을 찾아보는 중".to_string(),
+        "기억 쓰기" | "기억 덧붙이기" => "기억해 두는 중".to_string(),
+        "페이지 읽기" | "페이지 조작" => "페이지를 살펴보는 중".to_string(),
+        "웹 검색" => with("웹에서 찾는 중", detail),
+        "웹 페이지 읽기" => "웹 페이지를 읽는 중".to_string(),
+        "작업 맡기기" => with("작업자에게 맡기는 중", detail),
+        "작업자에게 전하기" | "작업 멈추기" | "작업 결과 보기" | "맡긴 작업 확인" => "맡긴 작업을 확인하는 중".to_string(),
+        "장소 찾기" => with("장소를 찾는 중", detail),
+        "그림 보기" => "그림을 보는 중".to_string(),
+        "보드 읽기" => "화면 내용을 확인하는 중".to_string(),
+        _ => activity.to_string(),
+    }
+}
+
 impl App {
     pub fn chat_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, talking: bool) {
         egui::Panel::left("chat")
@@ -244,7 +272,13 @@ impl App {
                     mine(ui, &self.cur_input.clone());
                     ui.add_space(3.0);
                     // 지금 오고 있는 답: 말하는 중이면 그 문장, 아니면 흘러 들어오는 한마디
-                    let live = self.caption.clone().or_else(|| self.say_live.clone()).or_else(|| self.got_output.then(|| self.board.say.clone()));
+                    let live = self
+                        .caption
+                        .clone()
+                        .or_else(|| self.say_live.clone())
+                        .or_else(|| self.turn_said.then(|| self.board.say.clone()))
+                        // 아직 한마디가 없는데 일은 시작했으면, 말없이 일하는 것처럼 보이지 않게 한다.
+                        .or_else(|| (!self.activity.is_empty() && !self.tidying).then(|| "확인하고 있어요.".to_string()));
                     if let Some(text) = live.filter(|t| !t.is_empty()) {
                         yours(ui, &text, true);
                     }
@@ -302,7 +336,7 @@ impl App {
                 "받았어요".to_string()
             }
         } else if !self.activity.is_empty() {
-            self.activity.clone()
+            plain(&self.activity)
         } else if !self.got_output {
             match self.pre.as_ref().and_then(|p| p.kind.clone()) {
                 Some(kind) => format!("{kind} · 생각하는 중"),
@@ -313,7 +347,20 @@ impl App {
             "화면에 쓰는 중".to_string()
         };
         let text = if self.busy { format!("{what} · {}초", self.sent_at.elapsed().as_secs()) } else { what };
-        let clip = p.with_clip_rect(r.rect);
+        // 멈춤: 도는 턴을 그만두게 한다. 글자는 이 버튼 왼쪽까지만 그려서 겹치지 않게 한다.
+        let mut right = r.rect.right();
+        if self.busy {
+            let stopping = self.stop.load(std::sync::atomic::Ordering::Relaxed);
+            let b = Rect::from_min_size(egui::pos2(r.rect.right() - 50.0, r.rect.top()), egui::vec2(50.0, 22.0));
+            right = b.left() - 8.0;
+            let resp = ui.interact(b, ui.scope_id().with("stop-turn"), egui::Sense::click());
+            p.rect_stroke(b, 11.0, egui::Stroke::new(1.0, if resp.hovered() { ui::TEXT } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+            p.text(b.center(), egui::Align2::CENTER_CENTER, if stopping { "멈추는 중" } else { "멈춤" }, ui::bold(if stopping { 10.5 } else { 11.5 }), if resp.hovered() { ui::TEXT } else { ui::DIM });
+            if resp.on_hover_text("지금 하는 일을 그만두게 합니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let clip = p.with_clip_rect(Rect::from_min_max(r.rect.min, egui::pos2(right, r.rect.bottom())));
         clip.text(r.rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), ui::ORANGE);
         ctx.request_repaint();
     }
