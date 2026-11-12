@@ -16,11 +16,15 @@ pub enum Kind {
     Metric,
     Chart,
     Timeline,
+    /// 들르는 곳의 위치와 길의 모양, 구간별 거리·시간을 직접 그리는 경로 카드
+    Route,
+    /// AI 가 선·화살표·상자·원·글로 직접 그리는 그림 카드
+    Draw,
     /// 웹 페이지나 HTML 파일을 그대로 보여 주는 작은 브라우저
     Web,
 }
 
-pub const KINDS: [(Kind, &str, (u8, u8)); 11] = [
+pub const KINDS: [(Kind, &str, (u8, u8)); 13] = [
     (Kind::Web, "web", (6, 5)),
     (Kind::Note, "note", (3, 2)),
     (Kind::Status, "status", (2, 1)),
@@ -32,6 +36,8 @@ pub const KINDS: [(Kind, &str, (u8, u8)); 11] = [
     (Kind::Metric, "metric", (2, 2)),
     (Kind::Chart, "chart", (4, 3)),
     (Kind::Timeline, "timeline", (3, 3)),
+    (Kind::Route, "route", (6, 5)),
+    (Kind::Draw, "draw", (5, 4)),
 ];
 
 impl Kind {
@@ -72,6 +78,10 @@ impl Kind {
             (Metric, "delta") => 14,
             (Metric, "text") => 60,
             (Chart, "unit") => 8,
+            (Chart, "form") => 8,
+            (Route, "total") => 40,
+            (Route, "text") => 80,
+            (Draw, "text") => 80,
             (Web, "url") => 600,
             _ => return None,
         })
@@ -443,6 +453,12 @@ impl Board {
         if !states.is_empty() && !states.contains(&cells[0].as_str()) {
             return Err(format!("{} 항목의 첫 칸은 {} 중 하나 ('{}')", c.kind.name(), states.join("|"), cells[0]));
         }
+        if c.kind == Kind::Route && cells.get(1).and_then(|v| v.split_once(',')).and_then(|(a, b)| Some((a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?))).is_none() {
+            return Err("route 항목은 '이름 | 위도,경도 | 다음 곳까지의 거리·시간(생략 가능)'. 좌표는 route_find 가 알려 준 것을 쓴다".into());
+        }
+        if c.kind == Kind::Draw && !["line", "arrow", "rect", "circle", "text"].contains(&cells[0].as_str()) {
+            return Err(format!("draw 항목의 첫 칸은 line|arrow|rect|circle|text 중 하나 ('{}')", cells[0]));
+        }
         if c.kind == Kind::Chart && cells.get(1).and_then(|v| v.replace(',', "").parse::<f64>().ok()).is_none() {
             return Err("chart 항목은 '이름 | 숫자'".into());
         }
@@ -454,8 +470,10 @@ impl Board {
             Some(slot) => slot.1 = cells, // add 가 기존 ID 에 오면 덮어쓴다 (중복 생성 방지)
             None if update => return Err(format!("{id} 에 항목 '{item}' 없음 — add 로 추가할 것")),
             None => {
-                if c.items.len() >= MAX_ITEMS {
-                    return Err(format!("{id} 항목 수 한도({MAX_ITEMS}) 초과"));
+                // 그림 카드는 도형 하나가 항목 하나라서 더 많이 받는다.
+                let limit = if c.kind == Kind::Draw { 80 } else { MAX_ITEMS };
+                if c.items.len() >= limit {
+                    return Err(format!("{id} 항목 수 한도({limit}) 초과"));
                 }
                 c.items.push((item.to_string(), cells));
             }

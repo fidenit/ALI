@@ -53,6 +53,18 @@ pub fn init(tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
     *UI.lock().unwrap_or_else(|e| e.into_inner()) = Some((tx, Box::new(wake)));
 }
 
+/// 화면 쪽 스레드에 요청을 보낸다 (도구가 브라우저 같은 화면 쪽 기능을 써야 할 때).
+pub fn to_ui(m: Msg) -> bool {
+    match UI.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        Some((tx, wake)) => {
+            let ok = tx.send(m).is_ok();
+            wake();
+            ok
+        }
+        None => false,
+    }
+}
+
 fn emit(ev: Event) {
     if let Some((tx, wake)) = UI.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         let _ = tx.send(Msg::Job(ev));

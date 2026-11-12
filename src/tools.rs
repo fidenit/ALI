@@ -61,6 +61,28 @@ pub fn definitions(worker: bool) -> Value {
             &["path"],
         ),
         tool(
+            "route_find",
+            "들르는 곳들을 순서대로 잇는 자동차 길을 찾는다. 구간별 거리와 시간, 각 곳의 좌표가 돌아오고, 길의 모양이 route 카드용으로 저장된다. 경로나 동선을 보여 달라는 요청에는 지도 페이지를 띄우지 말고 이 도구로 찾은 뒤 route 카드로 직접 그린다.",
+            json!({
+                "card": { "type": "string", "description": "이 경로를 그릴 route 카드의 ID (새로 지어도 되고, 있는 카드의 것을 다시 써도 된다)" },
+                "stops": {
+                    "type": "array",
+                    "description": "들르는 곳들, 가는 순서대로 (2~12곳)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string", "description": "카드에 보일 짧은 이름" },
+                            "find": { "type": "string", "description": "위치를 찾을 검색어 (생략하면 name 으로 찾는다). 상호가 안 나오면 동네 이름이나 도로명 주소" },
+                            "lat": { "type": "number" },
+                            "lng": { "type": "number" },
+                        },
+                        "required": ["name"],
+                    },
+                },
+            }),
+            &["card", "stops"],
+        ),
+        tool(
             "place_find",
             "장소 이름이나 주소로 좌표(위도, 경도)를 찾는다 (오픈스트리트맵). 지도에 여러 곳을 잇는 경로를 띄우려면 좌표가 필요하다. 상호가 안 나오면 동네 이름이나 도로명 주소로 다시 찾는다.",
             json!({ "query": { "type": "string", "description": "장소 이름 또는 주소. 예: 비발디파크, 양양 낙산사, 강원 양양군 손양면 상운리" } }),
@@ -168,7 +190,7 @@ pub fn definitions(worker: bool) -> Value {
     ]);
     // 작업자는 화면과 브라우저를 직접 다루지 않고, 일을 다시 남에게 맡기지도 않는다. 메인은 progress 를 쓰지 않는다.
     let keep = |name: &str| {
-        if worker { !(name == "screen" || name == "board_read" || name.starts_with("browser_") || name.starts_with("job_")) } else { name != "progress" }
+        if worker { !(name == "screen" || name == "board_read" || name == "route_find" || name.starts_with("browser_") || name.starts_with("job_")) } else { name != "progress" }
     };
     Value::Array(all.as_array().unwrap().iter().filter(|t| keep(t["name"].as_str().unwrap_or(""))).cloned().collect())
 }
@@ -200,6 +222,7 @@ pub fn describe(name: &str, input: &Value) -> String {
         "edit_file" => format!("파일 고치기: {}", short("path")),
         "view_image" => format!("그림 보기: {}", short("path")),
         "place_find" => format!("장소 찾기: {}", short("query")),
+        "route_find" => "길 찾기".to_string(),
         "find_text" => format!("글자 찾기: {}", short("text")),
         "job_start" => format!("작업 맡기기: {}", short("title")),
         "job_list" => "맡긴 작업 확인".to_string(),
@@ -306,6 +329,7 @@ pub fn execute(name: &str, input: &Value) -> (String, bool) {
             hits.truncate(120);
             Ok(format!("{}\n(총 {total}건)", hits.join("\n")))
         }
+        "route_find" => crate::route::find(input),
         "place_find" => {
             let query = arg(input, "query")?;
             let encoded: String = query.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();

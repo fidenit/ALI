@@ -1,4 +1,4 @@
-//! 보드를 그린다. 배치 계산, 전환, 부품별 그리기, 사용자의 직접 조작.
+﻿//! 보드를 그린다. 배치 계산, 전환, 부품별 그리기, 사용자의 직접 조작.
 //! 사용자의 조작은 화면 수정 언어 한 줄로 바꿔서 돌려준다 (AI 의 조작과 같은 경로를 탄다).
 //!
 //! 디자인: 무광 검정. 채도 없는 회색조, 큰 둥근 모서리, 굵은 제목과 숫자,
@@ -1171,6 +1171,11 @@ fn input_lines(c: &Card, inputs: &HashMap<String, String>) -> Vec<String> {
     out
 }
 
+/// 숫자를 군더더기 없이 적는다 (12.0 → 12, 12.5 → 12.5).
+fn trim_num(v: f32) -> String {
+    if (v - v.round()).abs() < 0.05 { format!("{v:.0}") } else { format!("{v:.1}") }
+}
+
 fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
     let (x, top, w) = (body.left(), body.top(), body.width());
     let now = cx.now;
@@ -1223,6 +1228,301 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             }
             y += wrapped(p, pos2(x, y), w, c.field("text"), 12.5, DIM);
             y - top
+        }
+
+        Kind::Chart if matches!(c.field("form"), "line" | "donut" | "pie") => {
+            let vals: Vec<f32> =
+                c.items.iter().map(|(_, cells)| cells.get(1).and_then(|v| v.replace(',', "").parse().ok()).unwrap_or(0.0)).collect();
+            let unit = c.field("unit").to_string();
+            let h = body.height().max(150.0);
+            let k = cx.num("draw", 1.0);
+            if k < 1.0 {
+                *cx.moving = true;
+            }
+            if vals.is_empty() {
+                return h;
+            }
+            if c.field("form") == "line" {
+                // 꺾은선: 시간에 따라 어떻게 변했는지
+                let plot = Rect::from_min_max(pos2(x + 8.0, top + 24.0), pos2(body.right() - 8.0, top + h - 26.0));
+                let (lo, hi) = vals.iter().fold((f32::MAX, f32::MIN), |m, v| (m.0.min(*v), m.1.max(*v)));
+                let lo = if lo >= 0.0 { 0.0 } else { lo };
+                let span = (hi - lo).max(1e-6);
+                let n = vals.len();
+                let px = |i: usize| if n == 1 { plot.center().x } else { plot.left() + plot.width() * i as f32 / (n - 1) as f32 };
+                let pts: Vec<Pos2> = vals.iter().enumerate().map(|(i, v)| pos2(px(i), plot.bottom() - plot.height() * (v - lo) / span)).collect();
+                p.line_segment([plot.left_bottom(), plot.right_bottom()], Stroke::new(1.0, BORDER));
+                // 왼쪽에서부터 그려져 나간다.
+                let upto = (n as f32 - 1.0) * k;
+                let mut drawn: Vec<Pos2> = pts.iter().take(upto.floor() as usize + 1).copied().collect();
+                if (upto.floor() as usize) + 1 < n {
+                    let i = upto.floor() as usize;
+                    drawn.push(pts[i].lerp(pts[i + 1], upto.fract()));
+                }
+                if drawn.len() >= 2 {
+                    p.add(egui::Shape::line(drawn, Stroke::new(2.2, SOFT)));
+                }
+                let slot = if n > 1 { plot.width() / (n - 1) as f32 } else { plot.width() };
+                let peak = vals.iter().cloned().fold(f32::MIN, f32::max);
+                for (i, (item, cells)) in c.items.iter().enumerate() {
+                    let (rp, _) = cx.row(p, item);
+                    let top_one = vals[i] == peak;
+                    rp.circle_filled(pts[i], if top_one { 4.5 } else { 3.2 }, if top_one { ORANGE } else { TEXT });
+                    // 이름과 값은 자기 칸 폭 안에서만 그려서 옆의 것과 겹치지 않게 한다.
+                    let cell = Rect::from_center_size(pos2(pts[i].x, plot.center().y), vec2((slot - 4.0).max(24.0), h + 40.0));
+                    let lp = rp.with_clip_rect(cell.intersect(rp.clip_rect()));
+                    lp.text(pos2(pts[i].x, plot.bottom() + 6.0), Align2::CENTER_TOP, &cells[0], font(11.0), DIM);
+                    if n <= 12 {
+                        lp.text(pts[i] - vec2(0.0, 8.0), Align2::CENTER_BOTTOM, format!("{}{}", cells.get(1).map(String::as_str).unwrap_or(""), unit), font(11.0), if top_one { TEXT } else { SOFT });
+                    }
+                }
+            } else {
+                // 도넛: 전체에서 차지하는 몫
+                let total: f32 = vals.iter().map(|v| v.max(0.0)).sum::<f32>().max(1e-6);
+                let rad = ((h - 16.0) / 2.0).min(w * 0.22).max(30.0);
+                let center = pos2(x + rad + 8.0, top + h / 2.0);
+                let shades = [ORANGE, SOFT, DIM, GREEN, AMBER, RED, FAINT, EDGE];
+                let mut start = -std::f32::consts::FRAC_PI_2;
+                for (i, v) in vals.iter().enumerate() {
+                    let sweep = std::f32::consts::TAU * v.max(0.0) / total * k;
+                    let steps = ((sweep / 0.06).ceil() as usize).max(2);
+                    let gap = if vals.len() > 1 { 0.025 } else { 0.0 };
+                    let arc: Vec<Pos2> = (0..=steps).map(|s| start + gap + (sweep - 2.0 * gap).max(0.0) * s as f32 / steps as f32).map(|a| center + vec2(a.cos(), a.sin()) * (rad - 8.0)).collect();
+                    p.add(egui::Shape::line(arc, Stroke::new(15.0, shades[i % shades.len()])));
+                    start += sweep;
+                }
+                p.text(center, Align2::CENTER_CENTER, format!("{}{}", trim_num(total), unit), bold(14.0), TEXT);
+                let lx = center.x + rad + 22.0;
+                let rh = 24.0_f32.min((h - 8.0) / vals.len() as f32);
+                let ly = top + (h - rh * vals.len() as f32) / 2.0;
+                for (i, (item, cells)) in c.items.iter().enumerate() {
+                    let (rp, _) = cx.row(p, item);
+                    let y = ly + i as f32 * rh + rh / 2.0;
+                    rp.circle_filled(pos2(lx + 5.0, y), 4.5, shades[i % shades.len()]);
+                    let right = rp.text(pos2(body.right(), y), Align2::RIGHT_CENTER, if unit.trim() == "%" { format!("{}%", cells.get(1).map(String::as_str).unwrap_or("")) } else { format!("{}{}  {:.0}%", cells.get(1).map(String::as_str).unwrap_or(""), unit, vals[i].max(0.0) / total * 100.0) }, font(12.5), SOFT);
+                    rp.with_clip_rect(Rect::from_min_max(pos2(lx + 16.0, y - rh / 2.0), pos2(right.left() - 8.0, y + rh / 2.0)).intersect(rp.clip_rect())).text(pos2(lx + 18.0, y), Align2::LEFT_CENTER, &cells[0], bold(13.0), TEXT);
+                }
+            }
+            h
+        }
+
+        Kind::Route => {
+            // 지도 서비스 화면 대신 필요한 것만 직접 그린다: 들르는 곳의 위치, 길의 모양, 구간별 거리와 시간.
+            let stops: Vec<(String, (f64, f64), String)> = c
+                .items
+                .iter()
+                .filter_map(|(_, cells)| {
+                    let (la, lo) = cells.get(1)?.split_once(',')?;
+                    Some((cells[0].clone(), (la.trim().parse().ok()?, lo.trim().parse().ok()?), cells.get(2).cloned().unwrap_or_default()))
+                })
+                .collect();
+            let legs = stops.len().saturating_sub(1);
+            let note = c.field("text").to_string();
+            let list_h = if body.height() > 300.0 && legs > 0 { legs as f32 * 22.0 + 10.0 + if note.is_empty() { 0.0 } else { 20.0 } } else { 0.0 };
+            let map = Rect::from_min_max(body.min, pos2(body.right(), (body.bottom() - list_h).max(body.top() + 170.0)));
+            p.rect_filled(map, 14.0, mix(CARD, RAISED, 0.45));
+            if stops.len() < 2 {
+                p.text(map.center(), Align2::CENTER_CENTER, "들르는 곳이 둘 이상 있어야 길을 그립니다", font(12.5), FAINT);
+                return map.height();
+            }
+            // 저장해 둔 길의 모양. 없거나 지금의 출발·도착과 맞지 않으면 곧은 선으로 잇는다.
+            let straight: Vec<(f64, f64)> = stops.iter().map(|s| s.1).collect();
+            let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 0.03 && (a.1 - b.1).abs() < 0.03;
+            let shape: Vec<(f64, f64)> = match crate::route::path(&c.id) {
+                Some(s) if near(s[0], straight[0]) && near(s[s.len() - 1], straight[straight.len() - 1]) => s.to_vec(),
+                _ => straight.clone(),
+            };
+            // 위도·경도를 km 단위의 평면으로 편다 (이만한 넓이에서는 이것으로 충분하다).
+            let all = || shape.iter().chain(straight.iter());
+            let (la0, la1) = all().fold((f64::MAX, f64::MIN), |m, q| (m.0.min(q.0), m.1.max(q.0)));
+            let (lo0, lo1) = all().fold((f64::MAX, f64::MIN), |m, q| (m.0.min(q.1), m.1.max(q.1)));
+            let kx = 111.32 * ((la0 + la1) / 2.0).to_radians().cos();
+            let ky = 110.57;
+            let inner = Rect::from_min_max(map.min + vec2(52.0, 52.0), map.max - vec2(52.0, 40.0));
+            let (wkm, hkm) = (((lo1 - lo0) * kx).max(0.05) as f32, ((la1 - la0) * ky).max(0.05) as f32);
+            let scale = (inner.width() / wkm).min(inner.height() / hkm);
+            let to_px = |q: (f64, f64)| {
+                inner.center() + vec2((((q.1 - (lo0 + lo1) / 2.0) * kx) as f32) * scale, -(((q.0 - (la0 + la1) / 2.0) * ky) as f32) * scale)
+            };
+            let pts: Vec<Pos2> = shape.iter().map(|q| to_px(*q)).collect();
+            let mut along = vec![0.0_f32];
+            for i in 1..pts.len() {
+                along.push(along[i - 1] + (pts[i] - pts[i - 1]).length());
+            }
+            let total_len = along[along.len() - 1].max(1.0);
+            let at_len = |d: f32| {
+                let i = along.partition_point(|a| *a < d).clamp(1, pts.len() - 1);
+                let seg = (along[i] - along[i - 1]).max(1e-3);
+                pts[i - 1].lerp(pts[i], ((d - along[i - 1]) / seg).clamp(0.0, 1.0))
+            };
+            // 길은 출발지에서부터 그려져 나간다.
+            let k = cx.num("draw", 1.0);
+            let shown = total_len * k;
+            let mut drawn: Vec<Pos2> = pts.iter().zip(&along).take_while(|(_, a)| **a <= shown).map(|(q, _)| *q).collect();
+            drawn.push(at_len(shown));
+            p.add(egui::Shape::line(drawn.clone(), Stroke::new(6.0, mix(CARD, RAISED, 0.45))));
+            p.add(egui::Shape::line(drawn, Stroke::new(2.6, SOFT)));
+            // 들르는 곳이 길 위의 어디쯤인지 (길을 따라 앞에서부터 가장 가까운 점)
+            let mut from = 0;
+            let mut stop_at: Vec<f32> = Vec::new();
+            for s in &stops {
+                let q = to_px(s.1);
+                let i = (from..pts.len()).min_by(|a, b| (pts[*a] - q).length_sq().total_cmp(&(pts[*b] - q).length_sq())).unwrap_or(from);
+                stop_at.push(along[i]);
+                from = i;
+            }
+            let mut taken: Vec<Rect> = Vec::new();
+            let marks: Vec<Pos2> = stops.iter().map(|s| to_px(s.1)).collect();
+            for m in &marks {
+                taken.push(Rect::from_center_size(*m, vec2(22.0, 22.0)));
+            }
+            // 이름표: 표식의 오른쪽, 왼쪽, 위, 아래 가운데 다른 것과 겹치지 않는 자리에 놓는다.
+            let frame = map.shrink(6.0);
+            for (n, s) in stops.iter().enumerate() {
+                let size = p.layout_no_wrap(s.0.clone(), bold(12.0), TEXT).size();
+                let m = marks[n];
+                let spots = [
+                    Rect::from_min_size(m + vec2(14.0, -size.y / 2.0), size),
+                    Rect::from_min_size(m + vec2(-14.0 - size.x, -size.y / 2.0), size),
+                    Rect::from_min_size(m + vec2(-size.x / 2.0, -16.0 - size.y), size),
+                    Rect::from_min_size(m + vec2(-size.x / 2.0, 16.0), size),
+                ];
+                let free = |r: &Rect| frame.contains_rect(*r) && !taken.iter().any(|t| t.expand(2.0).intersects(*r));
+                let r = spots.iter().find(|r| free(r)).or_else(|| spots.iter().find(|r| frame.contains_rect(**r))).copied().unwrap_or(spots[0]);
+                let lp = p.with_clip_rect(frame.intersect(p.clip_rect()));
+                lp.rect_filled(r.expand2(vec2(4.0, 1.0)), 5.0, mix(CARD, RAISED, 0.45).gamma_multiply(0.85));
+                lp.text(r.min, Align2::LEFT_TOP, &s.0, bold(12.0), TEXT);
+                taken.push(r.expand2(vec2(4.0, 1.0)));
+            }
+            // 구간마다 거리·시간: 그 구간의 한가운데에. 자리가 없으면 그리지 않는다 (아래 목록에 있다).
+            for n in 0..legs {
+                let leg = &stops[n].2;
+                if leg.is_empty() || k < 0.98 {
+                    continue;
+                }
+                let mid = at_len((stop_at[n] + stop_at[n + 1]) / 2.0);
+                let size = p.layout_no_wrap(leg.clone(), font(11.0), SOFT).size() + vec2(14.0, 6.0);
+                let spots = [Rect::from_center_size(mid, size), Rect::from_center_size(mid + vec2(0.0, -18.0), size), Rect::from_center_size(mid + vec2(0.0, 18.0), size)];
+                if let Some(r) = spots.iter().find(|r| frame.contains_rect(**r) && !taken.iter().any(|t| t.expand(2.0).intersects(**r))) {
+                    p.rect_filled(*r, r.height() / 2.0, CARD);
+                    p.rect_stroke(*r, r.height() / 2.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                    p.text(r.center(), Align2::CENTER_CENTER, leg, font(11.0), SOFT);
+                    taken.push(*r);
+                }
+            }
+            // 표식: 출발과 도착은 채우고, 들르는 곳은 테두리만.
+            for (n, m) in marks.iter().enumerate() {
+                let end = n == 0 || n + 1 == marks.len();
+                let seen = stop_at[n] <= shown + 1.0;
+                let a = if seen { 1.0 } else { 0.35 };
+                p.circle_filled(*m, 10.0, if end { if n == 0 { ORANGE.gamma_multiply(a) } else { TEXT.gamma_multiply(a) } } else { CARD });
+                if !end {
+                    p.circle_stroke(*m, 10.0, Stroke::new(1.6, SOFT.gamma_multiply(a)));
+                }
+                p.text(*m, Align2::CENTER_CENTER, format!("{}", n + 1), bold(11.0), if end { CARD } else { SOFT.gamma_multiply(a) });
+            }
+            // 전체 거리·시간, 그리고 축척
+            let total = c.field("total");
+            if !total.is_empty() {
+                p.with_clip_rect(frame.intersect(p.clip_rect())).text(map.min + vec2(16.0, 13.0), Align2::LEFT_TOP, total, bold(15.5), TEXT);
+            }
+            let nice = [200.0_f32, 100.0, 50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1];
+            if let Some(km) = nice.iter().find(|km| **km * scale <= map.width() * 0.22) {
+                let (a, b) = (pos2(map.right() - 16.0 - km * scale, map.bottom() - 16.0), pos2(map.right() - 16.0, map.bottom() - 16.0));
+                p.line_segment([a, b], Stroke::new(1.2, FAINT));
+                p.line_segment([a - vec2(0.0, 3.0), a + vec2(0.0, 3.0)], Stroke::new(1.2, FAINT));
+                p.line_segment([b - vec2(0.0, 3.0), b + vec2(0.0, 3.0)], Stroke::new(1.2, FAINT));
+                let label = if *km >= 1.0 { format!("{km:.0}km") } else { format!("{:.0}m", km * 1000.0) };
+                p.text(pos2((a.x + b.x) / 2.0, a.y - 4.0), Align2::CENTER_BOTTOM, label, font(10.0), FAINT);
+            }
+            if k < 1.0 {
+                *cx.moving = true;
+            }
+            // 아래 목록: 구간별로 어디에서 어디까지 얼마인지
+            if list_h > 0.0 {
+                for n in 0..legs {
+                    let y = map.bottom() + 10.0 + n as f32 * 22.0 + 11.0;
+                    let right = p.text(pos2(body.right(), y), Align2::RIGHT_CENTER, &stops[n].2, font(12.5), SOFT);
+                    let names = p.with_clip_rect(Rect::from_min_max(pos2(x, y - 11.0), pos2(right.left() - 10.0, y + 11.0)).intersect(p.clip_rect()));
+                    names.text(pos2(x + 2.0, y), Align2::LEFT_CENTER, format!("{}  {} → {}  {}", n + 1, stops[n].0, n + 2, stops[n + 1].0), font(12.5), DIM);
+                }
+                if !note.is_empty() {
+                    // 값의 출처와 덧붙일 말 (한 줄, 넘치면 잘린다)
+                    let y = map.bottom() + 10.0 + legs as f32 * 22.0 + 12.0;
+                    p.with_clip_rect(Rect::from_min_max(pos2(x, y - 10.0), pos2(body.right(), y + 10.0)).intersect(p.clip_rect())).text(pos2(x + 2.0, y), Align2::LEFT_CENTER, &note, font(11.0), FAINT);
+                }
+            }
+            map.height() + list_h
+        }
+
+        Kind::Draw => {
+            // AI 가 직접 그리는 그림. 좌표는 카드 안쪽을 가로·세로 0~100 으로 본 값이다.
+            let (bw, bh) = (w, body.height().max(60.0));
+            let pair = |t: &str| -> Option<(f32, f32)> {
+                let (a, b) = t.split_once(',')?;
+                Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+            };
+            let at = |q: (f32, f32)| pos2(x + bw * q.0.clamp(0.0, 100.0) / 100.0, top + bh * q.1.clamp(0.0, 100.0) / 100.0);
+            for (item, cells) in &c.items {
+                let (rp, _) = cx.row(p, item);
+                let toks: Vec<&str> = cells.get(1).map(|s| s.split_whitespace().collect()).unwrap_or_default();
+                let label = cells.get(2).map(String::as_str).unwrap_or("");
+                let color = match cells.get(3).map(|s| s.trim()).unwrap_or("") {
+                    "accent" | "orange" | "주황" | "강조" => ORANGE,
+                    "green" | "초록" => GREEN,
+                    "red" | "빨강" => RED,
+                    "amber" | "yellow" | "노랑" => AMBER,
+                    "dim" | "gray" | "회색" => DIM,
+                    "faint" | "옅게" => FAINT,
+                    "white" | "밝게" => TEXT,
+                    _ => SOFT,
+                };
+                let size = match cells.get(4).map(|s| s.trim()).unwrap_or("") {
+                    "s" | "작게" => 10.5,
+                    "l" | "크게" => 17.0,
+                    _ => 12.5,
+                };
+                let points: Vec<Pos2> = toks.iter().filter_map(|t| pair(t)).map(at).collect();
+                match cells[0].as_str() {
+                    "line" | "arrow" if points.len() >= 2 => {
+                        rp.add(egui::Shape::line(points.clone(), Stroke::new(2.0, color)));
+                        let (a, b) = (points[points.len() - 2], points[points.len() - 1]);
+                        if cells[0] == "arrow" {
+                            let d = (b - a).normalized();
+                            let n = vec2(-d.y, d.x);
+                            rp.add(egui::Shape::convex_polygon(vec![b, b - d * 10.0 + n * 5.0, b - d * 10.0 - n * 5.0], color, Stroke::NONE));
+                        }
+                        if !label.is_empty() {
+                            let mid = points[0].lerp(points[points.len() - 1], 0.5);
+                            let sz = rp.layout_no_wrap(label.to_string(), font(size), color).size();
+                            let r = Rect::from_center_size(mid + vec2(0.0, -10.0), sz + vec2(8.0, 2.0));
+                            rp.rect_filled(r, 4.0, CARD.gamma_multiply(0.9));
+                            rp.text(r.center(), Align2::CENTER_CENTER, label, font(size), color);
+                        }
+                    }
+                    "rect" if toks.len() >= 2 => {
+                        if let (Some(min), Some(wh)) = (pair(toks[0]), pair(toks[1])) {
+                            let r = Rect::from_min_max(at(min), at((min.0 + wh.0, min.1 + wh.1)));
+                            rp.rect_filled(r, 8.0, color.gamma_multiply(0.12));
+                            rp.rect_stroke(r, 8.0, Stroke::new(1.4, color), StrokeKind::Inside);
+                            rp.with_clip_rect(r.shrink(4.0).intersect(rp.clip_rect())).text(r.center(), Align2::CENTER_CENTER, label, bold(size), TEXT);
+                        }
+                    }
+                    "circle" if toks.len() >= 2 => {
+                        if let (Some(center), Ok(radius)) = (pair(toks[0]), toks[1].parse::<f32>()) {
+                            let rad = bw.min(bh) * radius.clamp(0.5, 50.0) / 100.0;
+                            rp.circle_filled(at(center), rad, color.gamma_multiply(0.12));
+                            rp.circle_stroke(at(center), rad, Stroke::new(1.4, color));
+                            rp.text(at(center), Align2::CENTER_CENTER, label, bold(size), TEXT);
+                        }
+                    }
+                    "text" if !points.is_empty() => {
+                        rp.text(points[0], Align2::CENTER_CENTER, label, bold(size), color);
+                    }
+                    _ => {}
+                }
+            }
+            bh
         }
 
         Kind::Chart => {

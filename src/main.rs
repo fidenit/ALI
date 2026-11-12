@@ -12,6 +12,7 @@ mod lang;
 mod llm;
 mod memory;
 mod pics;
+mod route;
 mod sys;
 mod tools;
 mod tts;
@@ -154,6 +155,7 @@ struct App {
     pub stop: Arc<std::sync::atomic::AtomicBool>,
     /// 이번 턴에 AI 가 한마디(say)를 했는가
     pub turn_said: bool,
+    probe: Option<Probe>,
     /// 초기화를 한 번 눌러 확인을 기다리는 중이면 그 시각
     pub reset_armed: Option<std::time::Instant>,
     /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
@@ -168,6 +170,18 @@ struct App {
     job_turn: Option<String>,
     /// 구성 정리를 다시 하기까지 남은 턴 수
     tidy_rest: u8,
+}
+
+/// 보이지 않는 창으로 페이지 하나를 열어 글을 읽어 오는 일 (한 번에 하나).
+struct Probe {
+    url: String,
+    reply: Sender<String>,
+    view: Option<wry::WebView>,
+    since: std::time::Instant,
+    polled: std::time::Instant,
+    tx: Sender<String>,
+    got: Receiver<String>,
+    best: String,
 }
 
 struct Web {
@@ -267,6 +281,7 @@ impl App {
             task_topic: None,
             pics: Vec::new(),
             reset_armed: None,
+            probe: None,
             stop: Default::default(),
             turn_said: false,
             queue: Default::default(),
@@ -364,6 +379,16 @@ impl App {
                 idle(q, 150);
                 app.fake_marks.push_back((q.len(), format!("{step} (손 뗀 뒤)")));
             }
+        }
+        // 확인용: LYBOARD_PROBE=주소 로 주면 그 페이지를 보이지 않는 창으로 읽어 data\probe.log 에 남긴다.
+        if let Ok(url) = std::env::var("LYBOARD_PROBE") {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                let (tx, rx) = channel();
+                jobs::to_ui(llm::Msg::Probe { url, reply: tx });
+                let text = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_else(|_| "응답 없음".into());
+                sys::log("probe.log", &format!("읽은 값: {:?}\n{text}", route::read_summary(&text)));
+            });
         }
         // 확인용: 시작하자마자 이 주제 쪽으로 날아간다.
         if let Ok(g) = std::env::var("LYBOARD_GOTO") {
@@ -526,6 +551,7 @@ impl App {
             }
         }
         vault::wipe();
+        route::forget();
         self.view = ui::View::default();
         self.webviews.clear();
         self.recent.clear();
@@ -1122,6 +1148,15 @@ impl App {
                     self.pre = Some(p);
                 }
                 llm::Msg::Job(ev) => self.job_event(ev),
+                llm::Msg::Probe { url, reply } => {
+                    if self.probe.is_some() {
+                        let _ = reply.send("오류: 다른 페이지를 읽는 중".into());
+                    } else {
+                        let (tx, got) = channel();
+                        let now = std::time::Instant::now();
+                        self.probe = Some(Probe { url, reply, view: None, since: now, polled: now, tx, got, best: String::new() });
+                    }
+                }
                 llm::Msg::Keys(i, keys) => self.past.add_keys(i, &keys),
                 llm::Msg::Added(said) => {
                     // 대화 기록에서 이 말들이 지금 턴에 합쳐진 것으로 보이게 한다.
@@ -1291,6 +1326,50 @@ impl App {
                 ctx.request_repaint_after(std::time::Duration::from_millis(40));
             }
         }
+    }
+
+    /// 보이지 않는 창에서 페이지를 읽는 일을 한 걸음 진행한다. 원하는 글(거리와 시간)이 나오면 돌려주고 창을 없앤다.
+    fn run_probe(&mut self, frame: &eframe::Frame, ctx: &egui::Context) {
+        let Some(p) = &mut self.probe else { return };
+        if p.view.is_none() {
+            // 화면 밖에, 보이지 않게 만든다. 페이지는 넓은 화면인 줄 안다.
+            let bounds = wry::Rect { position: wry::dpi::LogicalPosition::new(-3000.0, -3000.0).into(), size: wry::dpi::LogicalSize::new(1280.0, 900.0).into() };
+            match wry::WebViewBuilder::new().with_bounds(bounds).with_url(&p.url).with_focused(false).build_as_child(frame) {
+                Ok(v) => p.view = Some(v),
+                Err(e) => {
+                    let _ = p.reply.send(format!("오류: 페이지를 열지 못함 ({e})"));
+                    self.probe = None;
+                    return;
+                }
+            }
+        }
+        while let Ok(text) = p.got.try_recv() {
+            // 스크립트의 결과는 JSON 문자열로 온다.
+            let text = serde_json::from_str::<String>(&text).unwrap_or(text);
+            if route::read_summary(&text).is_some() {
+                let _ = p.reply.send(text);
+                self.probe = None;
+                return;
+            }
+            if text.len() > p.best.len() {
+                p.best = text;
+            }
+        }
+        if p.since.elapsed().as_secs() >= 20 {
+            let _ = p.reply.send(format!("오류: 시간 안에 경로가 나오지 않음\n{}", p.best.chars().take(1500).collect::<String>()));
+            self.probe = None;
+            return;
+        }
+        if p.since.elapsed().as_millis() > 2500 && p.polled.elapsed().as_millis() > 800 {
+            p.polled = std::time::Instant::now();
+            let tx = p.tx.clone();
+            if let Some(v) = &p.view {
+                let _ = v.evaluate_script_with_callback("(document.body ? document.body.innerText : '').slice(0, 8000)", move |r| {
+                    let _ = tx.send(r);
+                });
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
 
     /// 웹 카드마다 브라우저 화면을 하나씩 두고, 카드가 움직이면 따라가게 한다.
@@ -1501,6 +1580,7 @@ impl eframe::App for App {
                 let moving =
                     ui::board(ui, &self.board, &mut self.view, &self.selected, &self.pending, &mut lines, &mut clicked, hot.as_deref(), &mut webs);
                 self.sync_webviews(frame, webs, ctx.zoom_factor());
+                self.run_probe(frame, &ctx);
                 for l in lines {
                     self.apply_line(&l, Author::User);
                 }

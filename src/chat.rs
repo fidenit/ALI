@@ -51,6 +51,7 @@ fn plain(activity: &str) -> String {
         "작업 맡기기" => with("작업자에게 맡기는 중", detail),
         "작업자에게 전하기" | "작업 멈추기" | "작업 결과 보기" | "맡긴 작업 확인" => "맡긴 작업을 확인하는 중".to_string(),
         "장소 찾기" => with("장소를 찾는 중", detail),
+        "길 찾기" => "길을 찾는 중".to_string(),
         "그림 보기" => "그림을 보는 중".to_string(),
         "보드 읽기" => "화면 내용을 확인하는 중".to_string(),
         _ => activity.to_string(),
