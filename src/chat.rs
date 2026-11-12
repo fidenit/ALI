@@ -198,6 +198,8 @@ impl App {
                     ui.add_space(3.0);
                     yours(ui, a, i + 1 == n && !self.busy);
                 }
+                // 답하는 중에 더 적은 말: 아직 전해지지 않은 것
+                let waiting: Vec<String> = self.queue.lock().map(|q| q.clone()).unwrap_or_default();
                 if self.busy {
                     mine(ui, &self.cur_input.clone());
                     ui.add_space(3.0);
@@ -208,6 +210,10 @@ impl App {
                     }
                 } else if let Some(c) = self.caption.clone() {
                     yours(ui, &c, true);
+                }
+                for w in &waiting {
+                    ui.label(egui::RichText::new(format!("곧 전함 · {w}")).size(13.0).color(ui::FAINT));
+                    ui.add_space(3.0);
                 }
             });
         });
@@ -313,7 +319,7 @@ impl App {
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.input)
-                        .hint_text(if self.busy { "답하는 중…" } else { "무엇이든 말하세요 · 사진은 붙여넣거나 끌어다 놓으세요" })
+                        .hint_text(if self.busy { "답하는 중에도 적으면 이어서 전합니다" } else { "무엇이든 말하세요 · 사진은 붙여넣거나 끌어다 놓으세요" })
                         .desired_width(f32::INFINITY)
                         .desired_rows(2)
                         // Enter 는 보내기, 줄을 바꾸려면 Shift+Enter

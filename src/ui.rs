@@ -148,6 +148,8 @@ pub struct View {
     pub task_rect: Option<Rect>,
     /// 이 주제의 구역을 "내 차례" 자리 바로 옆에 붙여 보여 달라는 예약
     dock: Option<String>,
+    /// 이 카드가 제 크기(100%)로 화면 안에 다 들어오게 해 달라는 예약
+    card_goto: Option<String>,
 }
 
 impl View {
@@ -155,6 +157,11 @@ impl View {
     /// 지금 보고 있는 범위와, 벗어날 수 없는 범위 (확인용으로 밖에서 읽는다).
     pub fn seen(&self) -> Option<(Rect, Rect)> {
         Some((self.scene?, self.limit?))
+    }
+
+    /// 이 카드가 제 크기로 화면에 다 보이게 한다 (웹 카드는 그래야 페이지가 보인다).
+    pub fn show_card(&mut self, card: String) {
+        self.card_goto = Some(card);
     }
 
     /// 사용자 앞에 가져온 일이 속한 주제를, 그 일 바로 옆(판의 왼쪽 위)에 붙여 보여 준다.
@@ -520,6 +527,27 @@ pub fn board(
             }
         }
         view.fit = Some(everything);
+        if let Some(id) = view.card_goto.clone() {
+            // 카드의 자리가 정해진 뒤에 간다 (방금 만든 카드는 다음 프레임에 자리가 생긴다).
+            if let Some(s) = slots.get(&id).filter(|s| !s.sticky) {
+                view.card_goto = None;
+                let size = vec2(s.w as f32 * (CW + GAP) - GAP, s.h as f32 * (CH + GAP) - GAP);
+                let card = Rect::from_min_size(s.pos.to_pos2(), size);
+                let zoom_now = area.width() / scene.width();
+                if zoom_now < 0.985 || !scene.shrink(8.0).contains_rect(card) {
+                    // 카드가 화면보다 크지 않으면 가운데에, 크면 왼쪽 위부터.
+                    let min = pos2(
+                        if size.x + 40.0 <= open.x { card.center().x - open.x / 2.0 } else { card.left() - 20.0 },
+                        if size.y + 40.0 <= open.y { card.center().y - open.y / 2.0 } else { card.top() - 20.0 },
+                    );
+                    view.fly = Some((scene, inside(Rect::from_min_size(min, open)), now));
+                    view.bounce = false;
+                    view.goto = None;
+                }
+            } else if board.card(&id).is_none() {
+                view.card_goto = None;
+            }
+        }
         // 사용자 앞에 일을 가져왔으면, 그 일이 속한 구역을 판의 왼쪽 위(그 일 바로 옆)에 붙인다. 주변의 다른 일이 함께 보인다.
         if let Some(topic) = view.dock.take() {
             if let Some(z) = zones.iter().find(|z| z.id == topic) {

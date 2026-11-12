@@ -25,6 +25,8 @@ pub enum Msg {
     Board { topic: String, reply: Sender<String> },
     /// 기억 정리가 끝나서, 턴 하나에 "찾을 때 쓸 낱말"이 붙었다 (턴 번호, 낱말들)
     Keys(usize, String),
+    /// 일하는 도중에 사용자가 덧붙인 말이 모델에게 전해졌다
+    Added(Vec<String>),
     Done(Stats),
     Error(String),
 }
@@ -82,7 +84,7 @@ pub struct PreInput {
 }
 
 /// 한 턴을 별도 스레드에서 실행한다. `wake` 는 화면을 다시 그리게 깨우는 함수.
-pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, pre: PreInput, turn_no: usize, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
+pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, queue: std::sync::Arc<std::sync::Mutex<Vec<String>>>, pre: PreInput, turn_no: usize, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         let send = |m: Msg| {
             let _ = tx.send(m);
@@ -124,7 +126,19 @@ pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, p
             }
         }
         let result = match &cfg.key {
-            Some(key) => crate::agent::run(&cfg, key, &turn_text, &images, &send),
+            Some(key) => {
+                // 답하는 중에 사용자가 더 적은 말: 도구를 쓰는 사이사이에 꺼내서 모델에게 전한다.
+                let added = || {
+                    let said: Vec<String> = queue.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+                    if said.is_empty() {
+                        return None;
+                    }
+                    let text = format!("<added>\n{}\n</added>", said.join("\n"));
+                    send(Msg::Added(said));
+                    Some(text)
+                };
+                crate::agent::run(&cfg, key, &turn_text, &images, &added, &send)
+            }
             None => demo(turn_no, &send),
         };
         match result {

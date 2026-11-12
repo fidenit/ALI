@@ -88,8 +88,9 @@ struct Reply {
 }
 
 /// `images` 는 사용자가 이번 말에 붙인 사진 (형식, base64).
-pub fn run(cfg: &Config, key: &str, turn_text: &str, images: &[(String, String)], send: &dyn Fn(Msg)) -> Result<Stats, String> {
-    let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| Ok(None), tool: &|_, _| None };
+/// `added` 는 일하는 도중에 사용자가 덧붙인 말을 꺼내 오는 함수 (없으면 None). 도구를 한 차례 쓴 뒤마다 불린다.
+pub fn run(cfg: &Config, key: &str, turn_text: &str, images: &[(String, String)], added: &dyn Fn() -> Option<String>, send: &dyn Fn(Msg)) -> Result<Stats, String> {
+    let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| Ok(added()), tool: &|_, _| None };
     run_as(cfg, key, &role, turn_text, images, send).map(|(stats, _)| stats)
 }
 

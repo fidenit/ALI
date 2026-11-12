@@ -147,6 +147,8 @@ struct App {
     fake_input: std::collections::VecDeque<Vec<egui::Event>>,
     fake_marks: std::collections::VecDeque<(usize, String)>,
     fake_frame: usize,
+    /// 답하는 중에 사용자가 더 적은 말. 도구를 쓰는 사이에 모델에게 전해지고, 그 전에 턴이 끝나면 다음 턴으로 간다.
+    pub queue: Arc<std::sync::Mutex<Vec<String>>>,
     /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
     pub pics: Vec<(pics::Pic, egui::TextureHandle)>,
     /// 방금까지 사용자 앞에 있던 일의 주제 (다음 일을 고를 때 같은 주제의 것부터 가져온다)
@@ -256,6 +258,7 @@ impl App {
             recall_cands: Vec::new(),
             task_topic: None,
             pics: Vec::new(),
+            queue: Default::default(),
             fake_input: Default::default(),
             fake_marks: Default::default(),
             fake_frame: 0,
@@ -424,6 +427,10 @@ impl App {
                 if by == Author::Ai {
                     let mut words = line.split_whitespace();
                     let (cmd, id) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                    // 웹 카드는 제 크기로 화면 안에 다 들어와야 페이지가 보인다. 만들거나 주소를 바꾸면 그렇게 보이는 자리로 간다.
+                    if matches!(cmd, "card" | "set") && self.board.card(id).map(|c| c.kind == core::Kind::Web).unwrap_or(false) {
+                        self.view.show_card(id.to_string());
+                    }
                     if cmd == "restore" {
                         self.view.want_topic(id.to_string());
                     }
@@ -707,7 +714,15 @@ impl App {
 
     fn send(&mut self, ctx: &egui::Context) {
         let input = self.input.trim().to_string();
-        if self.busy || (input.is_empty() && self.pics.is_empty()) {
+        if self.busy {
+            // 답하는 중에도 받는다. 줄을 세워 두면 하던 일 사이에 전해지거나, 끝나자마자 이어서 처리된다.
+            if !input.is_empty() {
+                self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(input);
+                self.input.clear();
+            }
+            return;
+        }
+        if input.is_empty() && self.pics.is_empty() {
             return;
         }
         let input = if input.is_empty() { "(사진을 보냄)".to_string() } else { input };
@@ -774,7 +789,7 @@ impl App {
             recall: std::mem::take(&mut self.recall_cands),
         };
         let ctx = ctx.clone();
-        llm::run_turn(self.cfg.clone(), text, images, pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
+        llm::run_turn(self.cfg.clone(), text, images, self.queue.clone(), pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
         self.turn_no += 1;
     }
 
@@ -1040,6 +1055,12 @@ impl App {
                 }
                 llm::Msg::Job(ev) => self.job_event(ev),
                 llm::Msg::Keys(i, keys) => self.past.add_keys(i, &keys),
+                llm::Msg::Added(said) => {
+                    // 대화 기록에서 이 말들이 지금 턴에 합쳐진 것으로 보이게 한다.
+                    for s in said {
+                        self.cur_input += &format!("\n+ {s}");
+                    }
+                }
                 llm::Msg::Board { topic, reply } => {
                     let found = self.board.topics.iter().any(|t| t.id == topic);
                     let _ = reply.send(if found {
@@ -1225,16 +1246,16 @@ impl App {
                         w.visible = s.visible;
                     }
                 }
-                None if s.visible => {
-                    let built = wry::WebViewBuilder::new().with_bounds(bounds).with_url(&url).with_focused(false).build_as_child(frame);
+                None => {
+                    // 화면에 안 보이는 자리에 있어도 페이지는 만들어 둔다 (AI 가 읽고 다룰 수 있어야 한다). 보일 때만 드러낸다.
+                    let built = wry::WebViewBuilder::new().with_bounds(bounds).with_url(&url).with_focused(false).with_visible(s.visible).build_as_child(frame);
                     match built {
                         Ok(view) => {
-                            self.webviews.insert(s.id.clone(), Web { view, url, rect: s.rect, visible: true });
+                            self.webviews.insert(s.id.clone(), Web { view, url, rect: s.rect, visible: s.visible });
                         }
                         Err(e) => self.error = Some(format!("브라우저 화면을 띄우지 못함: {e}")),
                     }
                 }
-                None => {}
             }
         }
     }
@@ -1339,6 +1360,13 @@ impl eframe::App for App {
         }
         let talking = self.tts.is_speaking() || !self.speech.is_empty();
         self.voice_input(&ctx, talking);
+        // 답하는 중에 적어 둔 말이 전해지지 못한 채 턴이 끝났으면, 바로 다음 턴으로 보낸다.
+        if !self.busy && self.react_at.is_none() {
+            let waiting: Vec<String> = self.queue.lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+            if !waiting.is_empty() {
+                self.start_turn(&ctx, waiting.join("\n"));
+            }
+        }
         // 맡긴 작업이 끝났으면, 사용자가 말하고 있지 않을 때 그 결과를 화면에 정리하는 턴을 돈다.
         if !self.job_news.is_empty() {
             let quiet = !self.busy && self.react_at.is_none() && !talking && self.stt.is_none() && !(self.mic.is_some() && self.heard);
@@ -1356,6 +1384,11 @@ impl eframe::App for App {
             }
         }
         if !self.autoplay.is_empty() {
+            // "+" 로 시작하는 입력은 앞의 턴이 도는 도중(시작 4초 뒤)에 넣는다: 답하는 중에 더 말하는 것을 시험한다.
+            if self.busy && self.autoplay.front().map(|n| n.starts_with('+')).unwrap_or(false) && self.sent_at.elapsed().as_millis() > 4000 {
+                self.input = self.autoplay.pop_front().unwrap_or_default().trim_start_matches('+').to_string();
+                self.send(&ctx);
+            }
             if !self.busy && !talking && self.job_news.is_empty() && self.idle_since.elapsed().as_millis() > 1200 {
                 // 확인용 대본에서는 "|" 가 입력 구분자라서, 조작 줄 안의 "|" 는 "¦" 로 적는다.
                 let next = self.autoplay.pop_front().unwrap_or_default().replace('¦', "|");

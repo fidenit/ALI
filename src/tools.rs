@@ -47,6 +47,12 @@ pub fn definitions(worker: bool) -> Value {
             &["path"],
         ),
         tool(
+            "place_find",
+            "장소 이름이나 주소로 좌표(위도, 경도)를 찾는다 (오픈스트리트맵). 지도에 여러 곳을 잇는 경로를 띄우려면 좌표가 필요하다. 상호가 안 나오면 동네 이름이나 도로명 주소로 다시 찾는다.",
+            json!({ "query": { "type": "string", "description": "장소 이름 또는 주소. 예: 비발디파크, 양양 낙산사, 강원 양양군 손양면 상운리" } }),
+            &["query"],
+        ),
+        tool(
             "view_image",
             "그림 파일을 직접 본다 (png, jpg, webp, gif, bmp). 사용자가 붙인 사진을 다시 보거나, 화면 캡처·도면·사진 파일의 내용을 확인할 때 쓴다.",
             json!({ "path": { "type": "string", "description": "절대 경로" } }),
@@ -179,6 +185,7 @@ pub fn describe(name: &str, input: &Value) -> String {
         "list_dir" => format!("폴더 보기: {}", short("path")),
         "edit_file" => format!("파일 고치기: {}", short("path")),
         "view_image" => format!("그림 보기: {}", short("path")),
+        "place_find" => format!("장소 찾기: {}", short("query")),
         "find_text" => format!("글자 찾기: {}", short("text")),
         "job_start" => format!("작업 맡기기: {}", short("title")),
         "job_list" => "맡긴 작업 확인".to_string(),
@@ -284,6 +291,29 @@ pub fn execute(name: &str, input: &Value) -> (String, bool) {
             let total = hits.len();
             hits.truncate(120);
             Ok(format!("{}\n(총 {total}건)", hits.join("\n")))
+        }
+        "place_find" => {
+            let query = arg(input, "query")?;
+            let encoded: String = query.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+            let url = format!("https://nominatim.openstreetmap.org/search?q={encoded}&format=jsonv2&limit=6&accept-language=ko");
+            let mut resp = crate::agent::http().get(&url).header("user-agent", "ALI-desktop/0.1").call().map_err(|e| format!("연결 실패: {e}"))?;
+            let text = resp.body_mut().read_to_string().map_err(|e| e.to_string())?;
+            let found: Value = serde_json::from_str(&text).map_err(|_| format!("장소 찾기 응답을 읽지 못함: {}", clip(&text, 200)))?;
+            let rows: Vec<String> = found
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .map(|p| {
+                            let num = |k: &str| p[k].as_str().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+                            format!("{} — 위도 {:.6}, 경도 {:.6} ({})", p["display_name"].as_str().unwrap_or("?"), num("lat"), num("lon"), p["type"].as_str().unwrap_or(""))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if rows.is_empty() {
+                return Ok(format!("'{query}' 로는 찾지 못함. 상호 대신 동네 이름이나 도로명 주소로 다시 찾아 본다"));
+            }
+            Ok(rows.join("\n"))
         }
         "job_start" | "job_list" | "job_tell" | "job_stop" | "job_result" => crate::jobs::tool(name, input),
         "write_file" => {
