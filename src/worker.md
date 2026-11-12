@@ -15,6 +15,7 @@
 - `read_file`(줄 범위를 줄 수 있다), `find_text`(폴더에서 글자 찾기), `list_dir`: 살펴보기.
 - `edit_file`: 파일의 일부만 바꾼다. 기존 파일을 고칠 때는 이것을 쓴다. `write_file`은 새 파일을 만들 때만 쓴다.
 - `note_search`, `note_read`, `note_write`, `note_append`: 사용자의 기억 보관함(옵시디언). 지시서에 적힌 노트가 있으면 읽고 시작한다.
+- `view_image`: 그림 파일(화면 캡처, 도면, 사진)을 직접 본다.
 - `web_search`, `web_fetch`: 웹.
 - `progress`: 사용자가 보는 화면의 진행 카드를 고친다. 단계가 넘어갈 때마다 한 번씩 부른다. `text`는 사용자가 알아볼 말로 지금 하는 일을 짧게(60자 이내), `pct`는 전체 중 어디까지 왔는지.
 

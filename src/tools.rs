@@ -47,6 +47,12 @@ pub fn definitions(worker: bool) -> Value {
             &["path"],
         ),
         tool(
+            "view_image",
+            "그림 파일을 직접 본다 (png, jpg, webp, gif, bmp). 사용자가 붙인 사진을 다시 보거나, 화면 캡처·도면·사진 파일의 내용을 확인할 때 쓴다.",
+            json!({ "path": { "type": "string", "description": "절대 경로" } }),
+            &["path"],
+        ),
+        tool(
             "edit_file",
             "파일의 일부만 바꾼다. old 에 지금 파일에 있는 글을 그대로 넣고(공백과 들여쓰기까지 같아야 한다) new 에 바꿀 글을 넣는다. old 는 파일에서 한 군데만 가리켜야 하므로 앞뒤 줄을 충분히 포함한다. 기존 파일을 고칠 때는 write_file 로 통째로 덮어쓰지 말고 이 도구를 쓴다.",
             json!({
@@ -172,6 +178,7 @@ pub fn describe(name: &str, input: &Value) -> String {
         "write_file" => format!("파일 쓰기: {}", short("path")),
         "list_dir" => format!("폴더 보기: {}", short("path")),
         "edit_file" => format!("파일 고치기: {}", short("path")),
+        "view_image" => format!("그림 보기: {}", short("path")),
         "find_text" => format!("글자 찾기: {}", short("text")),
         "job_start" => format!("작업 맡기기: {}", short("title")),
         "job_list" => "맡긴 작업 확인".to_string(),

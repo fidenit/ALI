@@ -46,7 +46,7 @@ impl App {
                         ui.set_min_size(ui.available_size());
                         // 내가 할 일이 있으면 이 구역을 위아래로 반씩 나눈다: 위는 "내 차례"(지금 처리할 일 하나), 아래는 대화.
                         let whole = ui.available_rect_before_wrap();
-                        let asks = self.board.cards.iter().filter(|c| c.kind == crate::core::Kind::Decision).count();
+                        let asks = self.board.cards.iter().filter(|c| c.kind.asks()).count();
                         let lower = if asks > 0 {
                             let (top, bottom) = whole.split_top_bottom_at_fraction(0.5);
                             ui.scope_builder(egui::UiBuilder::new().max_rect(top), |ui| self.task_slot(ui, asks));
@@ -68,6 +68,7 @@ impl App {
                                 self.key_setup(ui);
                             } else {
                                 self.input_box(ui, ctx);
+                                self.pics_row(ui);
                             }
                             ui.add_space(8.0);
                             if let Some(e) = self.error.clone() {
@@ -271,6 +272,37 @@ impl App {
         ctx.request_repaint();
     }
 
+    /// 입력창 위: 붙여 둔 사진들. 누르면 뺀다.
+    fn pics_row(&mut self, ui: &mut egui::Ui) {
+        if self.pics.is_empty() {
+            return;
+        }
+        let mut remove = None;
+        ui.add_space(6.0);
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 58.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for (n, (pic, tex)) in self.pics.iter().enumerate() {
+                let (r, p) = ui.allocate_painter(egui::vec2(56.0, 56.0), egui::Sense::click());
+                // 그림의 가운데를 정사각형으로 잘라 보여 준다.
+                let (w, h) = (pic.thumb.0 as f32, pic.thumb.1 as f32);
+                let side = w.min(h);
+                let uv = Rect::from_min_max(egui::pos2((w - side) / 2.0 / w, (h - side) / 2.0 / h), egui::pos2((w + side) / 2.0 / w, (h + side) / 2.0 / h));
+                egui::Image::new((tex.id(), egui::vec2(56.0, 56.0))).uv(uv).corner_radius(12).paint_at(ui, r.rect);
+                p.rect_stroke(r.rect, 12.0, egui::Stroke::new(1.0, if r.hovered() { ui::TEXT } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+                if r.hovered() {
+                    p.rect_filled(r.rect, 12.0, egui::Color32::from_black_alpha(140));
+                    p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "빼기", ui::bold(12.0), ui::TEXT);
+                }
+                if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    remove = Some(n);
+                }
+            }
+        });
+        if let Some(n) = remove {
+            let _ = self.pics.remove(n);
+        }
+    }
+
     fn input_box(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let now = ui.input(|i| i.time);
         let pill = egui::Frame::new()
@@ -281,7 +313,7 @@ impl App {
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.input)
-                        .hint_text(if self.busy { "답하는 중…" } else { "무엇이든 말하세요" })
+                        .hint_text(if self.busy { "답하는 중…" } else { "무엇이든 말하세요 · 사진은 붙여넣거나 끌어다 놓으세요" })
                         .desired_width(f32::INFINITY)
                         .desired_rows(2)
                         // Enter 는 보내기, 줄을 바꾸려면 Shift+Enter
@@ -317,7 +349,18 @@ impl App {
         ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 40.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             // 기록: 오늘의 기록 노트를 옵시디언에서 연다 (옵시디언이 없으면 보관함 폴더를 연다).
-            let (nr, np) = ui.allocate_painter(egui::vec2(76.0, 40.0), egui::Sense::click());
+            // 사진: 파일을 골라 붙인다 (붙여넣기와 끌어다 놓기도 된다).
+            let (pr, pp) = ui.allocate_painter(egui::vec2(64.0, 40.0), egui::Sense::click());
+            pp.rect_filled(pr.rect, 20.0, FIELD);
+            pp.rect_stroke(pr.rect, 20.0, egui::Stroke::new(1.0, if pr.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+            pp.text(pr.rect.center(), egui::Align2::CENTER_CENTER, "사진", ui::bold(13.0), if pr.hovered() { ui::TEXT } else { ui::DIM });
+            if pr.on_hover_text("사진 파일을 골라 붙입니다 · 캡처한 그림은 Ctrl+V 로 바로 붙습니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                let picked = rfd::FileDialog::new().add_filter("사진", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]).pick_files().unwrap_or_default();
+                for path in picked {
+                    self.add_pic(ctx, crate::pics::from_file(&path.display().to_string()));
+                }
+            }
+            let (nr, np) = ui.allocate_painter(egui::vec2(64.0, 40.0), egui::Sense::click());
             np.rect_filled(nr.rect, 20.0, FIELD);
             np.rect_stroke(nr.rect, 20.0, egui::Stroke::new(1.0, if nr.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
             np.text(nr.rect.center(), egui::Align2::CENTER_CENTER, "기록", ui::bold(13.0), if nr.hovered() { ui::TEXT } else { ui::DIM });

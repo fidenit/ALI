@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
 mod audio;
@@ -11,6 +11,7 @@ mod jobs;
 mod lang;
 mod llm;
 mod memory;
+mod pics;
 mod sys;
 mod tools;
 mod tts;
@@ -146,6 +147,8 @@ struct App {
     fake_input: std::collections::VecDeque<Vec<egui::Event>>,
     fake_marks: std::collections::VecDeque<(usize, String)>,
     fake_frame: usize,
+    /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
+    pub pics: Vec<(pics::Pic, egui::TextureHandle)>,
     /// 방금까지 사용자 앞에 있던 일의 주제 (다음 일을 고를 때 같은 주제의 것부터 가져온다)
     task_topic: Option<String>,
     /// 왼쪽 구역에 보관함 목록을 펼쳐 놓았는가
@@ -252,6 +255,7 @@ impl App {
             replay_date: None,
             recall_cands: Vec::new(),
             task_topic: None,
+            pics: Vec::new(),
             fake_input: Default::default(),
             fake_marks: Default::default(),
             fake_frame: 0,
@@ -424,7 +428,7 @@ impl App {
                         self.view.want_topic(id.to_string());
                     }
                     if matches!(cmd, "card" | "set" | "add" | "upd") {
-                        if let Some(c) = self.board.card(id).filter(|c| c.kind != core::Kind::Decision) {
+                        if let Some(c) = self.board.card(id).filter(|c| !c.kind.asks()) {
                             self.view.want_topic(c.topic.clone());
                         }
                     }
@@ -435,7 +439,7 @@ impl App {
                     // 체크는 연달아 누를 수 있으니 잠깐 기다렸다 한 번에, 선택지는 바로.
                     let wait = if line.starts_with("upd ") {
                         Some(900)
-                    } else if line.starts_with("set ") && line.contains(" chosen ") {
+                    } else if line.starts_with("set ") && (line.contains(" chosen ") || line.contains(" sent ")) {
                         Some(250)
                     } else {
                         None
@@ -457,10 +461,72 @@ impl App {
         }
     }
 
+    /// 사용자가 화면에서 한 조작을 대화 기록에 남길 짧은 말로 바꾼다 (명령어 그대로는 읽기 어렵다).
+    fn events_label(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for line in self.turn_events.split(" / ") {
+            let mut w = line.split_whitespace();
+            let (cmd, id, third) = (w.next().unwrap_or(""), w.next().unwrap_or(""), w.next().unwrap_or(""));
+            let cells: Vec<&str> = line.splitn(4, ' ').nth(3).unwrap_or("").split('|').map(str::trim).collect();
+            let card = self.board.card(id);
+            let kind = card.map(|c| c.kind);
+            match (cmd, kind) {
+                ("set", Some(core::Kind::Decision)) if third == "chosen" => {
+                    let option = line.split_whitespace().nth(3).unwrap_or("");
+                    let name = card.and_then(|c| c.items.iter().find(|(i, _)| i == option)).map(|(_, c)| c[0].clone()).unwrap_or_else(|| option.to_string());
+                    parts.push(format!("선택: {name}"));
+                }
+                ("upd", Some(core::Kind::Input)) if cells.len() >= 3 => parts.push(format!("{}: {}", cells[0], cells[2])),
+                ("upd", Some(core::Kind::Checklist)) if cells.len() >= 2 => parts.push(format!("{}: {}", if cells[0] == "done" { "체크" } else { "체크 해제" }, cells[1])),
+                ("set", Some(core::Kind::Input)) => {}
+                ("restore", _) => parts.push("보관함에서 꺼냄".to_string()),
+                _ => {}
+            }
+        }
+        if parts.is_empty() { format!("(화면에서 직접 조작) {}", self.turn_events) } else { format!("({})", parts.join(" · ")) }
+    }
+
+    /// 사진 하나를 입력창에 붙인다.
+    pub fn add_pic(&mut self, ctx: &egui::Context, pic: Result<pics::Pic, String>) {
+        match pic {
+            Ok(_) if self.pics.len() >= 6 => self.error = Some("사진은 한 번에 6장까지 붙일 수 있습니다".into()),
+            Ok(p) => {
+                let small = egui::ColorImage::from_rgba_unmultiplied([p.thumb.0, p.thumb.1], &p.thumb.2);
+                let tex = ctx.load_texture(format!("pic{}", self.pics.len()), small, Default::default());
+                self.pics.push((p, tex));
+                self.error = None;
+                self.focus_input = true;
+            }
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// 붙여넣기(Ctrl+V)로 온 그림과 창에 끌어다 놓은 그림 파일을 받는다.
+    fn take_pics(&mut self, ctx: &egui::Context) {
+        let pasted: Vec<std::sync::Arc<egui::ColorImage>> =
+            ctx.input(|i| i.events.iter().filter_map(|e| if let egui::Event::PasteImage(img) = e { Some(img.clone()) } else { None }).collect());
+        for img in pasted {
+            let rgba: Vec<u8> = img.pixels.iter().flat_map(|p| p.to_srgba_unmultiplied()).collect();
+            self.add_pic(ctx, pics::from_rgba(img.size[0], img.size[1], rgba));
+        }
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        for path in dropped {
+            self.add_pic(ctx, pics::from_file(&path.display().to_string()));
+        }
+        // 확인용: LYBOARD_PIC=파일 경로 로 주면 시작할 때 그 그림을 붙인 것으로 친다.
+        if let Ok(path) = std::env::var("LYBOARD_PIC") {
+            if self.turn_no == 0 && self.pics.is_empty() && !self.busy {
+                self.add_pic(ctx, pics::from_file(&path));
+                // SAFETY: 확인용으로 한 번만 쓰고 지운다. 다른 스레드가 이 변수를 읽지 않는다.
+                unsafe { std::env::remove_var("LYBOARD_PIC") };
+            }
+        }
+    }
+
     /// 사용자가 처리할 일(결정 카드)을 하나 골라 앞에 가져다 놓는다. 사용자가 일을 찾아다니는 것이 아니라 일이 사용자를 찾아온다.
     /// 앞에 있던 일이 처리되어 사라졌으면 다음 일을 가져오고, 보드는 그 일이 속한 구역을 바로 옆에 붙여 보여 준다.
     fn pick_task(&mut self) {
-        let asks: Vec<(String, String)> = self.board.cards.iter().filter(|c| c.kind == core::Kind::Decision).map(|c| (c.id.clone(), c.topic.clone())).collect();
+        let asks: Vec<(String, String)> = self.board.cards.iter().filter(|c| c.kind.asks()).map(|c| (c.id.clone(), c.topic.clone())).collect();
         if let Some(cur) = &self.view.task {
             if asks.iter().any(|a| &a.0 == cur) {
                 return;
@@ -482,7 +548,7 @@ impl App {
 
     /// 지금 일은 미뤄 두고 다음 일을 앞에 가져온다.
     pub fn next_task(&mut self) {
-        let asks: Vec<(String, String)> = self.board.cards.iter().filter(|c| c.kind == core::Kind::Decision).map(|c| (c.id.clone(), c.topic.clone())).collect();
+        let asks: Vec<(String, String)> = self.board.cards.iter().filter(|c| c.kind.asks()).map(|c| (c.id.clone(), c.topic.clone())).collect();
         if asks.len() < 2 {
             return;
         }
@@ -526,7 +592,7 @@ impl App {
         if let Some(c) = self.selected.as_deref().and_then(|s| self.board.card(s)) {
             level.insert(c.topic.as_str(), 2);
         }
-        for c in self.board.cards.iter().filter(|c| c.kind == core::Kind::Decision) {
+        for c in self.board.cards.iter().filter(|c| c.kind.asks()) {
             level.insert(c.topic.as_str(), 2);
         }
         let said = memory::grams(input);
@@ -641,9 +707,10 @@ impl App {
 
     fn send(&mut self, ctx: &egui::Context) {
         let input = self.input.trim().to_string();
-        if self.busy || input.is_empty() {
+        if self.busy || (input.is_empty() && self.pics.is_empty()) {
             return;
         }
+        let input = if input.is_empty() { "(사진을 보냄)".to_string() } else { input };
         self.input.clear();
         self.start_turn(ctx, input);
     }
@@ -652,7 +719,26 @@ impl App {
     fn start_turn(&mut self, ctx: &egui::Context, input: String) {
         self.flush_speech(); // 말하는 중에 새로 말을 걸면 하던 말을 멈춘다
         self.turn_events = self.events.join(" / ");
-        let text = self.turn_text(&input);
+        let mut text = self.turn_text(&input);
+        // 붙여 둔 사진: 이번 말과 함께 보내고, 나중에 다시 볼 수 있게 보관함에도 남긴다.
+        let mut images = Vec::new();
+        let mut saved = Vec::new();
+        if !input.is_empty() {
+            let (date, time) = sys::now_local();
+            let dir = vault::root().join("첨부");
+            let _ = std::fs::create_dir_all(&dir);
+            for (n, (pic, _)) in self.pics.drain(..).enumerate() {
+                let path = dir.join(format!("{date} {}-{}.{}", time.replace(':', ""), n + 1, pic.ext()));
+                if std::fs::write(&path, &pic.data).is_ok() {
+                    saved.push(path.display().to_string());
+                }
+                images.push((pic.media.to_string(), pic.b64()));
+            }
+        }
+        if !images.is_empty() {
+            text += &format!("\n<images>\n사용자가 이번 말에 사진 {}장을 붙였다 (이 메시지 앞에 들어 있다). 저장된 곳:\n{}\n</images>", images.len(), saved.join("\n"));
+        }
+        let pics_note = if images.is_empty() { String::new() } else { format!("(사진 {}장) ", images.len()) };
         if std::env::var("LYBOARD_DEBUG").is_ok() {
             debug_log("turn.log", &format!("{text}\n=====\n")); // 확인용: 모델에게 보낸 것 그대로
         }
@@ -665,9 +751,9 @@ impl App {
         } else if self.tidying {
             "(분류와 주제 정리)".to_string()
         } else if auto {
-            format!("(화면에서 직접 조작) {}", self.turn_events)
+            self.events_label()
         } else {
-            input
+            format!("{pics_note}{input}")
         };
         self.turn_raw.clear();
         self.turn_actions.clear();
@@ -688,7 +774,7 @@ impl App {
             recall: std::mem::take(&mut self.recall_cands),
         };
         let ctx = ctx.clone();
-        llm::run_turn(self.cfg.clone(), text, pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
+        llm::run_turn(self.cfg.clone(), text, images, pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
         self.turn_no += 1;
     }
 
@@ -795,7 +881,7 @@ impl App {
                 .topics
                 .iter()
                 .filter(|t| !hot_topics.contains(&t.id))
-                .filter(|t| !self.board.cards.iter().any(|c| c.topic == t.id && (c.kind == core::Kind::Decision || c.id.starts_with("job"))))
+                .filter(|t| !self.board.cards.iter().any(|c| c.topic == t.id && (c.kind.asks() || c.id.starts_with("job"))))
                 .filter_map(|t| {
                     let age = today - days_of(self.touched_on.get(&t.id)?);
                     (age >= limit).then(|| (age, format!("주제 {}({})는 {age}일 동안 손대지 않음. 끝났거나 한동안 볼 일이 없으면 archive 로 보관할 것", t.id, t.name)))
@@ -1275,7 +1361,10 @@ impl eframe::App for App {
                 let next = self.autoplay.pop_front().unwrap_or_default().replace('¦', "|");
                 if let Some(line) = next.strip_prefix('!') {
                     // "!" 로 시작하면 입력이 아니라 사용자의 화면 조작으로 넣는다 (클릭을 흉내 내는 확인용).
-                    self.apply_line(line, Author::User);
+                    // 한 번의 조작이 여러 줄이면 ⏎ 로 이어 적는다 (입력 카드의 보내기처럼).
+                    for l in line.split('⏎') {
+                        self.apply_line(l.trim(), Author::User);
+                    }
                     self.idle_since = std::time::Instant::now() + std::time::Duration::from_secs(2);
                 } else {
                     self.input = next;
@@ -1285,6 +1374,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
+        self.take_pics(&ctx);
         self.pick_task();
         self.chat_panel(ui, &ctx, talking);
 

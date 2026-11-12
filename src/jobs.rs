@@ -224,7 +224,7 @@ fn start(input: &Value) -> Result<String, String> {
             }
         };
         let role = agent::Role { system: WORKER, tools: tools::definitions(true), max_steps: MAX_STEPS, check: &check, tool: &tool };
-        let result = agent::run_as(&cfg, &key, &role, &first, &send);
+        let result = agent::run_as(&cfg, &key, &role, &first, &[], &send);
         let secs = started.elapsed().as_secs();
         let (state, ok, report) = match result {
             Ok((stats, text)) => {

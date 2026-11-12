@@ -115,6 +115,8 @@ struct CardView {
     items: HashMap<String, f64>,
     /// 숫자 값의 전환 (막대 길이, 진행률)
     nums: HashMap<String, (f32, f32, f64)>,
+    /// 입력 카드의 칸에 사용자가 적고 있는 글 (항목 ID → 글)
+    inputs: HashMap<String, String>,
 }
 
 #[derive(Default)]
@@ -401,6 +403,10 @@ struct Ctx<'a> {
     webs: &'a mut Vec<WebSlot>,
     /// 카드를 끌거나 크기를 바꾸는 중인가
     lifted: bool,
+    /// 입력 카드의 글자 칸이 놓일 자리 (자리, 항목 ID, 안내 글, 처음 값). 실제 입력 칸은 본문을 그린 뒤에 그 자리에 올린다.
+    fields: &'a mut Vec<(Rect, String, String, String)>,
+    /// 입력 카드에 지금 적혀 있는 글
+    inputs: &'a HashMap<String, String>,
 }
 
 impl Ctx<'_> {
@@ -597,6 +603,7 @@ pub fn board(
                     resizing: false,
                     snap: c.clone(),
                     dying: None,
+                    inputs: Default::default(),
                     sticky: false,
                     content_h: 0.0,
                     items: HashMap::new(),
@@ -781,7 +788,10 @@ pub fn board(
             if body.height() > 4.0 && detail > 0.02 {
                 let mut bp = p.with_clip_rect(body.expand2(vec2(2.0, 0.0)).intersect(p.clip_rect()));
                 bp.set_opacity(alpha * detail);
+                let mut fields: Vec<(Rect, String, String, String)> = Vec::new();
                 let mut cx = Ctx {
+                    fields: &mut fields,
+                    inputs: &v.inputs,
                     ui,
                     now,
                     id,
@@ -795,6 +805,19 @@ pub fn board(
                     lifted,
                 };
                 let used = draw_body(&mut cx, &bp, body, &c);
+                // 입력 카드: 그려 둔 자리에 실제 글자 칸을 올린다. Enter 를 누르면 보낸다.
+                let mut submit = false;
+                for (r, item, hint, initial) in fields {
+                    let buf = v.inputs.entry(item).or_insert(initial);
+                    let edit = egui::TextEdit::singleline(buf).frame(egui::Frame::NONE).hint_text(hint).font(font(14.0)).text_color(TEXT).desired_width(r.width());
+                    let resp = ui.put(r, edit);
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submit = true;
+                    }
+                }
+                if submit {
+                    lines.extend(input_lines(&c, &v.inputs));
+                }
                 if alive {
                     v.content_h = used;
                 }
@@ -1026,7 +1049,7 @@ fn world(board: &Board, view: &View, plain_width: f32) -> (HashMap<String, Slot>
         let rect = Rect::from_min_size(pos2(x, y), size);
         let shift = vec2(x + REGION_PAD, y + REGION_HEAD);
         let topic_ids: Vec<&str> = z.iter().map(|zz| zz.id.as_str()).collect();
-        let asks = board.cards.iter().filter(|c| c.kind == Kind::Decision && board.topics.iter().any(|t| t.id == c.topic && t.group.as_deref().unwrap_or("") == gid)).count();
+        let asks = board.cards.iter().filter(|c| c.kind.asks() && board.topics.iter().any(|t| t.id == c.topic && t.group.as_deref().unwrap_or("") == gid)).count();
         let _ = topic_ids;
         for (id, mut slot) in s {
             slot.pos += shift;
@@ -1103,6 +1126,23 @@ fn state_dot(p: &Painter, c: Pos2, state: &str, now: f64, moving: &mut bool) {
 }
 
 /// 부품 종류별 본문. 반환값은 내용이 실제로 차지한 높이.
+/// 입력 카드를 보낼 때 나가는 조작: 칸마다 적은 값을 항목의 셋째 칸에 넣고, 보냈다는 표시를 한다.
+fn input_lines(c: &Card, inputs: &HashMap<String, String>) -> Vec<String> {
+    let clean = |s: &str| s.replace(['|', '\n', '\r'], " ").trim().chars().take(crate::core::CELL_LIMIT).collect::<String>();
+    let mut out = Vec::new();
+    for (item, cells) in &c.items {
+        let value = inputs.get(item).map(|v| clean(v)).unwrap_or_default();
+        if !value.is_empty() {
+            let hint = cells.get(1).map(String::as_str).filter(|h| !h.trim().is_empty()).unwrap_or("-");
+            out.push(format!("upd {} {} {} | {} | {}", c.id, item, cells[0], hint, value));
+        }
+    }
+    if !out.is_empty() {
+        out.push(format!("set {} sent yes", c.id));
+    }
+    out
+}
+
 fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
     let (x, top, w) = (body.left(), body.top(), body.width());
     let now = cx.now;
@@ -1303,6 +1343,49 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 y += 28.0;
             }
             y - top
+        }
+
+        Kind::Input => {
+            // 사용자가 값을 직접 적어 넣는 카드: 항목마다 이름과 글자 칸, 맨 아래에 보내기.
+            let mut y = top + wrapped(p, body.min, w, c.field("text"), 14.5, SOFT) + 12.0;
+            let sent = !c.field("sent").is_empty();
+            for (item, cells) in &c.items {
+                let (rp, dy) = cx.row(p, item);
+                rp.text(pos2(x + 2.0, y + dy), Align2::LEFT_TOP, &cells[0], font(12.0), DIM);
+                let r = Rect::from_min_size(pos2(x, y + dy + 19.0), vec2(w, 36.0));
+                rp.rect_filled(r, 11.0, RAISED);
+                rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                let answer = cells.get(2).cloned().unwrap_or_default();
+                let hint = cells.get(1).filter(|h| h.as_str() != "-").cloned().unwrap_or_default();
+                if sent || !cx.live || cx.alpha < 0.9 {
+                    // 이미 보냈거나 멀리서 보는 중: 적힌 값만 보여 준다.
+                    let shown = cx.inputs.get(item).cloned().filter(|v| !v.is_empty()).unwrap_or(answer);
+                    let inner = rp.with_clip_rect(r.shrink2(vec2(12.0, 0.0)).intersect(rp.clip_rect()));
+                    if shown.is_empty() {
+                        inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &hint, font(14.0), FAINT);
+                    } else {
+                        inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &shown, font(14.0), TEXT);
+                    }
+                } else {
+                    cx.fields.push((r.shrink2(vec2(12.0, 7.0)), item.clone(), hint, answer));
+                }
+                y += 19.0 + 36.0 + 10.0;
+            }
+            let br = Rect::from_min_size(pos2(x + w - 92.0, y + 2.0), vec2(92.0, 34.0));
+            if sent {
+                p.text(br.right_center(), Align2::RIGHT_CENTER, "보냈습니다", font(12.5), DIM);
+            } else {
+                let ready = c.items.iter().any(|(i, _)| cx.inputs.get(i).map(|v| !v.trim().is_empty()).unwrap_or(false));
+                let resp = cx.click(br, ("send", ""));
+                let hover = resp.as_ref().map(|r| r.hovered()).unwrap_or(false);
+                p.rect_filled(br, 17.0, if ready { mix(SOFT, TEXT, if hover { 1.0 } else { 0.0 }) } else { RAISED });
+                p.text(br.center(), Align2::CENTER_CENTER, "보내기", bold(13.5), if ready { CARD } else { FAINT });
+                if ready && resp.map(|r| r.clicked()).unwrap_or(false) {
+                    let out = input_lines(c, cx.inputs);
+                    cx.lines.extend(out);
+                }
+            }
+            y + 36.0 - top
         }
 
         Kind::Decision => {

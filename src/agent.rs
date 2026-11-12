@@ -56,7 +56,7 @@ pub fn ask(key: &str, model: &str, system: &str, user: &str, max_tokens: u32) ->
     Ok(v["content"].as_array().map(|a| a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("")).unwrap_or_default())
 }
 
-fn body(cfg: &Config, role: &Role, messages: &[Value], fallbacks: bool) -> String {
+fn body(cfg: &Config, role: &Role, messages: &[Value], fallbacks: bool, drop_block: bool) -> String {
     let mut v = json!({
         "model": cfg.model,
         "max_tokens": 32000,
@@ -69,6 +69,10 @@ fn body(cfg: &Config, role: &Role, messages: &[Value], fallbacks: bool) -> Strin
         "cache_control": { "type": "ephemeral" },
         "messages": messages,
     });
+    if drop_block {
+        // 앞선 생각 블록이 "대화가 달라졌다"는 이유로 거부됐을 때: 그 블록만 버리고 이어 가게 한다.
+        v["thinking"] = json!({ "type": "adaptive", "block_binding": { "prefix_mismatch_behavior": "drop_block" } });
+    }
     if fallbacks {
         // 안전 분류기가 요청을 거절하면 서버가 다른 모델로 이어서 답하게 한다.
         v["fallbacks"] = "default".into();
@@ -83,21 +87,31 @@ struct Reply {
     stop: String,
 }
 
-pub fn run(cfg: &Config, key: &str, turn_text: &str, send: &dyn Fn(Msg)) -> Result<Stats, String> {
+/// `images` 는 사용자가 이번 말에 붙인 사진 (형식, base64).
+pub fn run(cfg: &Config, key: &str, turn_text: &str, images: &[(String, String)], send: &dyn Fn(Msg)) -> Result<Stats, String> {
     let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| Ok(None), tool: &|_, _| None };
-    run_as(cfg, key, &role, turn_text, send).map(|(stats, _)| stats)
+    run_as(cfg, key, &role, turn_text, images, send).map(|(stats, _)| stats)
 }
 
 /// 모델이 일을 끝낼 때까지 돌린다. 마지막 응답의 글도 함께 돌려준다 (작업자의 보고서).
-pub fn run_as(cfg: &Config, key: &str, role: &Role, turn_text: &str, send: &dyn Fn(Msg)) -> Result<(Stats, String), String> {
+pub fn run_as(cfg: &Config, key: &str, role: &Role, turn_text: &str, images: &[(String, String)], send: &dyn Fn(Msg)) -> Result<(Stats, String), String> {
     let agent = http();
     let started = Instant::now();
     let mut stats = Stats { model: cfg.model.clone(), ..Default::default() };
     let mut fallbacks = true;
-    let mut messages = vec![json!({ "role": "user", "content": turn_text })];
+    let mut drop_block = false;
+    let mut messages = if images.is_empty() {
+        vec![json!({ "role": "user", "content": turn_text })]
+    } else {
+        // 사진을 먼저, 글을 뒤에 둔다.
+        let mut content: Vec<Value> =
+            images.iter().map(|(media, data)| json!({ "type": "image", "source": { "type": "base64", "media_type": media, "data": data } })).collect();
+        content.push(json!({ "type": "text", "text": turn_text }));
+        vec![json!({ "role": "user", "content": content })]
+    };
 
     for _ in 0..role.max_steps {
-        let reply = stream_once(&agent, cfg, key, role, &messages, &mut fallbacks, &mut stats, started, send)?;
+        let reply = stream_once(&agent, cfg, key, role, &messages, &mut fallbacks, &mut drop_block, &mut stats, started, send)?;
         send(Msg::Delta("\n".into())); // 응답 사이에 줄이 붙지 않게 한다
         // 빈 글 블록은 되돌려 보낼 수 없다.
         let content: Vec<Value> =
@@ -116,6 +130,19 @@ pub fn run_as(cfg: &Config, key: &str, role: &Role, turn_text: &str, send: &dyn 
                         let (rtx, rrx) = std::sync::mpsc::channel();
                         send(Msg::Screen { ops: input["ops"].as_str().unwrap_or("").to_string(), reply: rtx });
                         (rrx.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|_| "반영됨".into()), false)
+                    } else if name == "view_image" {
+                        // 그림 파일을 열어 그림 그대로 모델에게 보여 준다.
+                        send(Msg::Activity(crate::tools::describe(name, input)));
+                        match crate::pics::from_file(input["path"].as_str().unwrap_or("")) {
+                            Ok(pic) => {
+                                results.push(json!({ "type": "tool_result", "tool_use_id": b["id"], "content": [
+                                    { "type": "image", "source": { "type": "base64", "media_type": pic.media, "data": pic.b64() } },
+                                    { "type": "text", "text": format!("{}x{} 픽셀로 보냄", pic.w, pic.h) },
+                                ] }));
+                                continue;
+                            }
+                            Err(e) => (e, true),
+                        }
                     } else if name == "board_read" {
                         send(Msg::Activity(crate::tools::describe(name, input)));
                         let (rtx, rrx) = std::sync::mpsc::channel();
@@ -174,29 +201,41 @@ fn stream_once(
     role: &Role,
     messages: &[Value],
     fallbacks: &mut bool,
+    drop_block: &mut bool,
     stats: &mut Stats,
     started: Instant,
     send: &dyn Fn(Msg),
 ) -> Result<Reply, String> {
-    let post = |fallbacks: bool| {
+    let post = |fallbacks: bool, drop_block: bool| {
         let mut req = agent
             .post(URL)
             .header("content-type", "application/json")
             .header("x-api-key", key)
             .header("anthropic-version", "2026-10-21");
-        if fallbacks {
-            req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
+        let betas: Vec<&str> = [(fallbacks, "server-side-fallback-2026-07-01"), (drop_block, "thinking-binding-controls-2026-08-01")].iter().filter(|b| b.0).map(|b| b.1).collect();
+        if !betas.is_empty() {
+            req = req.header("anthropic-beta", betas.join(","));
         }
-        req.send(body(cfg, role, messages, fallbacks)).map_err(|e| format!("연결 실패: {e}"))
+        req.send(body(cfg, role, messages, fallbacks, drop_block)).map_err(|e| format!("연결 실패: {e}"))
     };
-    let mut resp = post(*fallbacks)?;
-    if resp.status().as_u16() == 400 && *fallbacks {
+    let mut resp = post(*fallbacks, *drop_block)?;
+    for _ in 0..2 {
+        if resp.status().as_u16() != 400 {
+            break;
+        }
         let text = resp.body_mut().read_to_string().unwrap_or_default();
-        if !text.contains("fallback") {
+        if !*drop_block && text.contains("block_binding") {
+            // 앞서 받은 생각 블록이 "그때와 대화 내용이 다르다"고 거부됐다. 그 블록만 버리게 하고 이어 간다 (이 턴이 끝날 때까지 유지).
+            // 원인을 찾을 수 있게 보낸 내용을 남긴다.
+            crate::sys::log("api.log", &format!("생각 블록 거부, 버리고 다시 보냄: {}", api_error(400, &text)));
+            let _ = std::fs::write(crate::sys::data_dir().join("bind-error.json"), json!({ "error": text, "messages": messages }).to_string());
+            *drop_block = true;
+        } else if *fallbacks && text.contains("fallback") {
+            *fallbacks = false; // 이 계정·모델에서 fallbacks 가 안 받아들여지면 빼고 다시 보낸다
+        } else {
             return Err(api_error(400, &text));
         }
-        *fallbacks = false; // 이 계정·모델에서 fallbacks 가 안 받아들여지면 빼고 다시 보낸다
-        resp = post(false)?;
+        resp = post(*fallbacks, *drop_block)?;
     }
     let status = resp.status().as_u16();
     if status != 200 {
@@ -273,11 +312,14 @@ fn stream_once(
             }
             "content_block_stop" => {
                 if let Some(raw) = partial.remove(&idx) {
-                    blocks[idx]["input"] = if raw.trim().is_empty() {
-                        json!({})
+                    if raw.trim().is_empty() {
+                        // 입력이 조각으로 오지 않았으면 처음 받은 것을 그대로 둔다 (지우면 받은 내용을 고친 것이 되어 다음 요청이 거부된다).
+                        if !blocks[idx]["input"].is_object() {
+                            blocks[idx]["input"] = json!({});
+                        }
                     } else {
-                        serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "__invalid_json": raw }))
-                    };
+                        blocks[idx]["input"] = serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "__invalid_json": raw }));
+                    }
                 }
             }
             "message_delta" => {

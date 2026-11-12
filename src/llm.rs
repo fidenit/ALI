@@ -82,7 +82,7 @@ pub struct PreInput {
 }
 
 /// 한 턴을 별도 스레드에서 실행한다. `wake` 는 화면을 다시 그리게 깨우는 함수.
-pub fn run_turn(cfg: Config, turn_text: String, pre: PreInput, turn_no: usize, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
+pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, pre: PreInput, turn_no: usize, tx: Sender<Msg>, wake: impl Fn() + Send + 'static) {
     std::thread::spawn(move || {
         let send = |m: Msg| {
             let _ = tx.send(m);
@@ -124,7 +124,7 @@ pub fn run_turn(cfg: Config, turn_text: String, pre: PreInput, turn_no: usize, t
             }
         }
         let result = match &cfg.key {
-            Some(key) => crate::agent::run(&cfg, key, &turn_text, &send),
+            Some(key) => crate::agent::run(&cfg, key, &turn_text, &images, &send),
             None => demo(turn_no, &send),
         };
         match result {

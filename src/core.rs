@@ -9,6 +9,8 @@ pub enum Kind {
     Status,
     Progress,
     Decision,
+    /// 사용자에게서 값(날짜, 이름, 숫자)을 직접 받아야 할 때: 칸에 적고 보내는 카드
+    Input,
     Checklist,
     Table,
     Metric,
@@ -18,12 +20,13 @@ pub enum Kind {
     Web,
 }
 
-pub const KINDS: [(Kind, &str, (u8, u8)); 10] = [
+pub const KINDS: [(Kind, &str, (u8, u8)); 11] = [
     (Kind::Web, "web", (6, 5)),
     (Kind::Note, "note", (3, 2)),
     (Kind::Status, "status", (2, 1)),
     (Kind::Progress, "progress", (3, 3)),
     (Kind::Decision, "decision", (3, 3)),
+    (Kind::Input, "input", (3, 3)),
     (Kind::Checklist, "checklist", (3, 3)),
     (Kind::Table, "table", (4, 3)),
     (Kind::Metric, "metric", (2, 2)),
@@ -41,6 +44,10 @@ impl Kind {
     pub fn default_size(self) -> (u8, u8) {
         KINDS.iter().find(|k| k.0 == self).map(|k| k.2).unwrap_or((3, 2))
     }
+    /// 사용자의 답을 기다리는 카드인가 ("내 차례"로 가져갈 것)
+    pub fn asks(self) -> bool {
+        matches!(self, Kind::Decision | Kind::Input)
+    }
     pub fn has_items(self) -> bool {
         !matches!(self, Kind::Note | Kind::Status | Kind::Metric | Kind::Web)
     }
@@ -57,6 +64,8 @@ impl Kind {
             (Progress, "text") => 60,
             (Decision, "text") => 120,
             (Decision, "chosen") => 24,
+            (Input, "text") => 120,
+            (Input, "sent") => 8,
             (Table, "cols") => 200,
             (Metric, "value") => 14,
             (Metric, "unit") => 8,
