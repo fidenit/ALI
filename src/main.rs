@@ -28,6 +28,11 @@ use eframe::egui;
 use crate::core::{Author, Board};
 
 const TITLE: &str = "ALI";
+
+/// 창의 이름. 확인용으로 띄운 창은 사용자가 실제 창과 헷갈리지 않게 이름을 다르게 한다.
+fn title() -> &'static str {
+    if std::env::var("LYBOARD_AUTOPLAY").is_ok() { "ALI 시험용 (쓰지 마세요)" } else { TITLE }
+}
 /// 이 크기보다 큰 소리가 들어오면 말하는 중으로 본다.
 const MIC_THRESHOLD: f32 = 0.02;
 /// 매 턴 그대로 보여 주는 최근 대화의 수. 그보다 오래된 것은 관련 있을 때만 찾아서 보여 준다.
@@ -1509,7 +1514,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         if !self.titlebar_done {
             // 창이 만들어진 뒤에야 적용되므로 될 때까지 시도한다.
-            self.titlebar_done = sys::dark_titlebar(TITLE, (16, 17, 19), (138, 139, 145));
+            self.titlebar_done = sys::dark_titlebar(title(), (16, 17, 19), (138, 139, 145));
         }
         if let Some(at) = self.react_at {
             if !self.busy && std::time::Instant::now() >= at {
@@ -1631,7 +1636,7 @@ fn main() -> eframe::Result {
     let quiet = std::env::var("LYBOARD_AUTOPLAY").is_ok();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(TITLE)
+            .with_title(title())
             .with_inner_size([1560.0, 920.0])
             .with_active(!quiet)
             // 확인용: 창을 띄울 위치 (LYBOARD_POS="x,y")
@@ -1639,7 +1644,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        TITLE,
+        title(),
         options,
         Box::new(|cc| {
             setup_fonts(&cc.egui_ctx);

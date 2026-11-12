@@ -65,7 +65,7 @@ pub fn geocode(query: &str) -> Result<(String, Point), String> {
 }
 
 /// 카카오맵 검색 결과의 첫 몇 곳을 읽는 스크립트. 결과가 나왔거나 9초가 지나도록 없으면 끝에 § 를 붙여 돌려준다.
-const KAKAO_SEARCH: &str = r#"(function(){var l=document.querySelector('#info\\.search\\.place\\.list');var its=l?[].slice.call(l.querySelectorAll('li.PlaceItem'),0,3):[];var out=its.map(function(it){var g=function(s){var e=it.querySelector(s);return e?(e.getAttribute('title')||e.textContent||'').trim():''};return {name:g('[data-id=name]'),kind:g('[data-id=subcategory]'),addr:g('[data-id=address]'),lot:g('[data-id=otherAddr]')}});if(out.length)return JSON.stringify(out)+'§';return performance.now()>9000?'[]§':''})()"#;
+const KAKAO_SEARCH: &str = r#"(function(){var l=document.querySelector('#info\\.search\\.place\\.list');var its=l?[].slice.call(l.querySelectorAll('li.PlaceItem'),0,4):[];var out=its.map(function(it){var g=function(s){var e=it.querySelector(s);return e?(e.getAttribute('title')||e.textContent||'').trim():''};return {name:g('[data-id=name]'),kind:g('[data-id=subcategory]'),addr:g('[data-id=address]'),lot:g('[data-id=otherAddr]')}});if(out.length)return JSON.stringify(out)+'§';return performance.now()>9000?'[]§':''})()"#;
 
 /// 카카오맵에서 찾은 장소
 pub struct Place {
@@ -77,8 +77,8 @@ pub struct Place {
     pub lot: String,
 }
 
-/// 카카오맵에서 장소를 찾는다 (상호 검색이 정확하다). 보이지 않는 창으로 검색 화면을 열어 첫 결과를 읽는다.
-pub fn kakao_place(query: &str) -> Result<Place, String> {
+/// 카카오맵에서 장소를 찾는다 (상호 검색이 정확하다). 보이지 않는 창으로 검색 화면을 열어 위쪽 결과 몇 곳을 읽는다.
+pub fn kakao_places(query: &str) -> Result<Vec<Place>, String> {
     let url = format!("https://map.kakao.com/link/search/{}", encode(query));
     let (tx, rx) = std::sync::mpsc::channel();
     if !crate::jobs::to_ui(crate::llm::Msg::Probe { url, script: KAKAO_SEARCH.to_string(), needle: "§".to_string(), reply: tx }) {
@@ -86,9 +86,33 @@ pub fn kakao_place(query: &str) -> Result<Place, String> {
     }
     let text = rx.recv_timeout(std::time::Duration::from_secs(26)).map_err(|_| "카카오맵에서 답이 오지 않음".to_string())?;
     let list: Value = serde_json::from_str(text.trim_end_matches('§')).map_err(|_| format!("카카오맵에서 '{query}' 를 찾지 못함"))?;
-    let first = list.get(0).ok_or_else(|| format!("카카오맵에 '{query}' 로 나오는 곳이 없음"))?;
-    let s = |k: &str| first[k].as_str().unwrap_or("").trim().to_string();
-    Ok(Place { name: s("name"), kind: s("kind"), addr: s("addr"), lot: s("lot").trim_start_matches("(지번)").trim().to_string() })
+    let places: Vec<Place> = list
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    let s = |k: &str| p[k].as_str().unwrap_or("").trim().to_string();
+                    Place { name: s("name"), kind: s("kind"), addr: s("addr"), lot: s("lot").trim_start_matches("(지번)").trim().to_string() }
+                })
+                .filter(|p| !p.name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if places.is_empty() {
+        return Err(format!("카카오맵에 '{query}' 로 나오는 곳이 없음"));
+    }
+    Ok(places)
+}
+
+/// 검색어의 낱말이 전부 이 장소의 이름·종류·주소에 들어 있으면 "그 곳이 맞다"고 본다.
+/// 하나라도 없으면(예: "K1 레이싱"으로 찾았는데 "K1스피드"가 나옴) 사용자가 뜻한 곳인지 확실하지 않다.
+fn matches(query: &str, p: &Place) -> bool {
+    let squash = |s: &str| s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+    let hay = squash(&format!("{} {} {} {}", p.name, p.kind, p.addr, p.lot));
+    query.split_whitespace().all(|w| {
+        let w = squash(w);
+        w.is_empty() || hay.contains(&w)
+    })
 }
 
 /// 카카오맵이 알려 준 주소를 좌표로 바꾼다. 도로명 주소로 찾고(같은 이름의 길이 여러 토막이면 지번 주소의 동·리가 맞는 것),
@@ -162,6 +186,9 @@ pub fn find(input: &Value) -> Result<String, String> {
         return Err("들르는 곳은 12곳까지".into());
     }
     let mut found: Vec<(String, Point, String)> = Vec::new();
+    // 사용자가 뜻한 곳인지 확실하지 않은 곳, 아예 못 찾은 곳 (모델이 사용자에게 되묻게 한다)
+    let mut unsure: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
     for (n, s) in stops.iter().enumerate() {
         let name = s["name"].as_str().unwrap_or("").trim().to_string();
         if name.is_empty() {
@@ -175,15 +202,32 @@ pub fn find(input: &Value) -> Result<String, String> {
                     std::thread::sleep(std::time::Duration::from_millis(1100)); // 좌표 찾기 서비스의 사용 규칙: 1초에 한 번
                 }
                 // 장소는 카카오맵에서 찾는다 (상호까지 정확하다). 거기서 못 찾으면 오픈스트리트맵에서 이름으로 찾아본다.
-                match kakao_place(query).and_then(|p| locate(&p).map(|at| (p, at))) {
-                    Ok((p, at)) => found.push((name, at, format!("{} ({}) {}", p.name, p.kind, p.addr))),
-                    Err(why) => {
-                        let (matched, at) = geocode(query).map_err(|_| format!("{why}. 이 곳의 find 를 카카오맵에서 검색되는 이름(상호와 지역)이나 주소로 바꿔서 다시 찾는다"))?;
-                        found.push((name, at, format!("{matched} (카카오맵에서는 못 찾음: 위치가 정확하지 않을 수 있다)")));
+                let show = |p: &Place| format!("{} ({}) {}", p.name, p.kind, p.addr);
+                match kakao_places(query) {
+                    Ok(list) => {
+                        // 검색어와 딱 맞는 곳이 있으면 그것, 없으면 맨 위의 것을 쓰되 "확실하지 않다"고 알린다.
+                        let pick = list.iter().position(|p| matches(query, p));
+                        let p = &list[pick.unwrap_or(0)];
+                        if pick.is_none() || (list.iter().filter(|x| matches(query, x)).count() > 1 && list[0].name != list[1].name && !query.chars().any(|c| c.is_ascii_digit())) {
+                            let others: Vec<String> = list.iter().map(|x| format!("    - {}", show(x))).collect();
+                            unsure.push(format!("{name} ('{query}' 로 찾음): 일단 '{}' 로 잡았지만 사용자가 뜻한 곳인지 확실하지 않다. 카카오맵에 나온 곳들:\n{}", p.name, others.join("\n")));
+                        }
+                        match locate(p) {
+                            Ok(at) => found.push((name, at, show(p))),
+                            Err(why) => missing.push(format!("{name}: {why}")),
+                        }
                     }
+                    Err(why) => missing.push(format!("{name}: {why}")),
                 }
             }
         }
+    }
+    if !missing.is_empty() {
+        // 못 찾은 곳이 있으면 길을 그리지 않는다. 어림잡은 위치로 그린 지도는 틀린 지도다.
+        return Err(format!(
+            "아래 곳을 찾지 못해서 길을 그리지 않았다.\n{}\n\n할 일: (1) web_search 로 그 곳이 무엇이고 어디에 있는지 찾아본다 (정식 이름, 있는 건물이나 단지, 주소). (2) 알아냈으면 find 를 그 정식 이름이나 주소로 바꿔 route_find 를 다시 부른다. (3) 그래도 알 수 없으면 추측하지 말고 사용자에게 묻는다: 찾아본 후보가 있으면 decision 카드로 \"이 곳을 말씀하신 건가요?\"라고, 없으면 input 카드로 정확한 이름이나 주소를.",
+            missing.join("\n")
+        ));
     }
     let coords: Vec<String> = found.iter().map(|(_, (lat, lng), _)| format!("{lng:.6},{lat:.6}")).collect();
     let v = get(&format!("https://router.project-osrm.org/route/v1/driving/{}?overview=full&geometries=polyline&steps=false", coords.join(";")))?;
@@ -239,6 +283,12 @@ pub fn find(input: &Value) -> Result<String, String> {
         let leg = legs.get(n).map(|(d, t)| format!("{} · {}", km_text(*d), time_text(*t))).unwrap_or_default();
         out += &format!("{}. {name} ({lat:.5}, {lng:.5}){}{}\n", n + 1, if matched.is_empty() { String::new() } else { format!(" — 찾은 곳: {matched}") }, if leg.is_empty() { String::new() } else { format!(" → 다음 곳까지 {leg}") });
         lines += &format!("add {card} s{} {name} | {lat:.5},{lng:.5}{}\n", n + 1, if leg.is_empty() { String::new() } else { format!(" | {leg}") });
+    }
+    if !unsure.is_empty() {
+        out += &format!(
+            "\n확인이 필요한 곳:\n{}\n→ 이 곳들은 사용자에게 되묻는다. 필요하면 먼저 web_search 로 그 곳이 무엇인지 찾아보고, decision 카드로 \"<찾은 곳 이름>(<어디에 있는지>)을 말씀하신 건가요?\"라고 후보를 선택지로 올린다. 지도는 일단 아래대로 그려 두고, 답이 다르면 그 곳의 find 를 바꿔 다시 그린다.\n",
+            unsure.join("\n")
+        );
     }
     out += "\n\"찾은 곳\"이 뜻한 곳과 다르면 그 곳의 find 를 바꿔 다시 찾는다. 맞으면 아래 명령으로 화면에 그린다 (주제 ID 와 제목만 정해서, 나머지는 그대로):\n";
     Ok(out + &lines)
@@ -338,6 +388,15 @@ mod tests {
         assert_eq!(read_summary("48분\n32.5km"), Some((32_500.0, 48.0 * 60.0)));
         // 아직 결과가 안 나온 화면
         assert_eq!(read_summary("오늘은\n어디로 안내할까요?\n50m\n측정"), None);
+    }
+
+    #[test]
+    fn knows_when_a_found_place_may_not_be_the_one_meant() {
+        let p = |name: &str, kind: &str, addr: &str| Place { name: name.into(), kind: kind.into(), addr: addr.into(), lot: String::new() };
+        // 검색어의 낱말이 다 들어 있으면 그 곳이 맞다.
+        assert!(matches("강릉 솔향 펜션", &p("솔향펜션", "펜션", "강원특별자치도 강릉시 해안로 1")));
+        // "레이싱"이 어디에도 없으면 사용자에게 확인해야 한다.
+        assert!(!matches("비발디파크 K1 레이싱", &p("K1스피드 비발디파크점", "카트", "강원특별자치도 홍천군 서면 한치골길 262")));
     }
 
     #[test]
