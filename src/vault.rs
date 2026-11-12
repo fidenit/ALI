@@ -21,6 +21,21 @@ pub fn root() -> PathBuf {
     r
 }
 
+/// 보관함의 내용을 전부 지운다 (옵시디언의 설정 폴더는 남긴다).
+pub fn wipe() {
+    let r = root();
+    if let Ok(rd) = std::fs::read_dir(&r) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let p = e.path();
+            let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        }
+    }
+    let _ = root(); // 빈 폴더들을 다시 만든다
+}
+
 /// 보관함 안의 경로로 바꾼다. 보관함 밖을 가리키면 거부한다. 확장자가 없으면 .md 를 붙인다.
 fn resolve(rel: &str) -> Result<PathBuf, String> {
     let rel = rel.trim().trim_start_matches(['/', '\\']);

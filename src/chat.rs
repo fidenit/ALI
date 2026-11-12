@@ -59,6 +59,7 @@ impl App {
                         ui.set_min_size(ui.available_size());
                         // 아래에서 위로 쌓는다: 맨 아래에 상태 줄, 그 위에 버튼, 입력창, 진행 표시. 남는 위쪽이 대화.
                         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                            self.reset_row(ui);
                             ui.label(egui::RichText::new(self.status_line()).size(10.5).color(ui::FAINT));
                             ui.add_space(8.0);
                             self.buttons(ui, ctx);
@@ -116,6 +117,45 @@ impl App {
             ui.painter().text(rest.left_top() + egui::vec2(4.0, 10.0), egui::Align2::LEFT_TOP, "답을 반영하는 중입니다. 끝나면 다음 일이 옵니다.", ui::font(12.5), ui::FAINT);
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); // 점이 깜빡인다
+    }
+
+    /// 맨 아래의 초기화. 실수로 지우지 않게 두 번 눌러야 한다: 한 번 누르면 확인을 묻고, 6초 안에 다시 눌러야 지운다.
+    fn reset_row(&mut self, ui: &mut egui::Ui) {
+        if self.cfg.demo() {
+            return;
+        }
+        let armed = self.reset_armed.map(|t| t.elapsed().as_secs() < 6).unwrap_or(false);
+        if !armed {
+            self.reset_armed = None;
+        }
+        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
+        if armed {
+            // 왼쪽에 경고, 오른쪽에 두 버튼. 서로 겹치지 않게 경고 글은 버튼 왼쪽까지만 그린다.
+            let yes = Rect::from_min_size(egui::pos2(r.rect.right() - 118.0, r.rect.top()), egui::vec2(66.0, 20.0));
+            let no = Rect::from_min_size(egui::pos2(r.rect.right() - 46.0, r.rect.top()), egui::vec2(46.0, 20.0));
+            let warn = p.with_clip_rect(Rect::from_min_max(r.rect.min, egui::pos2(yes.left() - 8.0, r.rect.bottom())));
+            warn.text(r.rect.left_center(), egui::Align2::LEFT_CENTER, "화면·대화·기억·기록을 전부 지웁니다", ui::bold(11.5), ui::RED);
+            let y = ui.interact(yes, ui.scope_id().with("reset-yes"), egui::Sense::click());
+            let n = ui.interact(no, ui.scope_id().with("reset-no"), egui::Sense::click());
+            p.rect_stroke(yes, 10.0, egui::Stroke::new(1.0, ui::RED), egui::StrokeKind::Inside);
+            p.text(yes.center(), egui::Align2::CENTER_CENTER, "지우기", ui::bold(11.5), ui::RED);
+            p.text(no.center(), egui::Align2::CENTER_CENTER, "취소", ui::bold(11.5), if n.hovered() { ui::TEXT } else { ui::DIM });
+            if y.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.reset_armed = None;
+                self.reset_all();
+            } else if n.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.reset_armed = None;
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        } else {
+            let b = Rect::from_min_size(egui::pos2(r.rect.right() - 46.0, r.rect.top()), egui::vec2(46.0, 20.0));
+            let resp = ui.interact(b, ui.scope_id().with("reset"), egui::Sense::click());
+            p.text(b.right_center(), egui::Align2::RIGHT_CENTER, "초기화", ui::font(11.0), if resp.hovered() { ui::TEXT } else { ui::FAINT });
+            if resp.on_hover_text("화면, 대화, 기억, 기록을 전부 지우고 처음부터 시작합니다 (API 키와 설정은 남습니다)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.reset_armed = Some(std::time::Instant::now());
+            }
+        }
+        ui.add_space(2.0);
     }
 
     /// 보관함으로 가는 한 줄. 보관된 주제가 있을 때만 보인다.

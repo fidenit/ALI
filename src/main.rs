@@ -106,6 +106,7 @@ struct App {
     titlebar_done: bool,
     shot: Option<String>,
     shot_from: std::time::Instant,
+    shot_sent: Option<std::time::Instant>,
     shot_delay: u64,
     /// 이번 턴에서 모델의 출력이나 도구 사용이 시작됐는가 (아직이면 "기다리는 중" 표시)
     got_output: bool,
@@ -149,6 +150,8 @@ struct App {
     fake_frame: usize,
     /// 답하는 중에 사용자가 더 적은 말. 도구를 쓰는 사이에 모델에게 전해지고, 그 전에 턴이 끝나면 다음 턴으로 간다.
     pub queue: Arc<std::sync::Mutex<Vec<String>>>,
+    /// 초기화를 한 번 눌러 확인을 기다리는 중이면 그 시각
+    pub reset_armed: Option<std::time::Instant>,
     /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
     pub pics: Vec<(pics::Pic, egui::TextureHandle)>,
     /// 방금까지 사용자 앞에 있던 일의 주제 (다음 일을 고를 때 같은 주제의 것부터 가져온다)
@@ -234,6 +237,7 @@ impl App {
             titlebar_done: false,
             shot: std::env::var("LYBOARD_SHOT").ok(),
             shot_from: std::time::Instant::now(),
+            shot_sent: None,
             shot_delay: std::env::var("LYBOARD_SHOT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(3500),
             got_output: false,
             sent_at: std::time::Instant::now(),
@@ -258,6 +262,7 @@ impl App {
             recall_cands: Vec::new(),
             task_topic: None,
             pics: Vec::new(),
+            reset_armed: None,
             queue: Default::default(),
             fake_input: Default::default(),
             fake_marks: Default::default(),
@@ -491,6 +496,53 @@ impl App {
             }
         }
         if parts.is_empty() { format!("(화면에서 직접 조작) {}", self.turn_events) } else { format!("({})", parts.join(" · ")) }
+    }
+
+    /// 초기화: 화면, 대화, 기억, 기록을 전부 지우고 처음 상태로 돌아간다. API 키와 음성 설정만 남는다. 되돌릴 수 없다.
+    pub fn reset_all(&mut self) {
+        if self.busy || jobs::running() > 0 {
+            self.error = Some("답하는 중이거나 작업자가 일하는 중에는 초기화할 수 없습니다. 끝난 뒤에 다시 눌러 주세요.".into());
+            return;
+        }
+        self.flush_speech();
+        self.log = None; // 기록 파일을 놓아야 지울 수 있다
+        // data 폴더: 음성 켬/끔 설정만 남기고 전부 지운다.
+        if let Ok(rd) = std::fs::read_dir(sys::data_dir()) {
+            for e in rd.flatten() {
+                if e.file_name() == "voice" {
+                    continue;
+                }
+                let p = e.path();
+                let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+            }
+        }
+        vault::wipe();
+        self.view = ui::View::default();
+        self.webviews.clear();
+        self.recent.clear();
+        self.events.clear();
+        self.rejects.clear();
+        self.review.clear();
+        self.pending.clear();
+        self.pics.clear();
+        self.job_news.clear();
+        self.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.touched.clear();
+        self.touched_on.clear();
+        self.touch_seq = 0;
+        self.log_date.clear();
+        self.selected = None;
+        self.stats = None;
+        self.error = None;
+        self.tidy = None;
+        self.tidy_rest = 0;
+        self.task_topic = None;
+        self.react_at = None;
+        self.say_live = None;
+        self.caption = None;
+        self.show_shelf = false;
+        self.input.clear();
+        self.start_real_mode(); // 빈 보드와 빈 기억으로 다시 시작한다
     }
 
     /// 사진 하나를 입력창에 붙인다.
@@ -1338,9 +1390,14 @@ impl eframe::App for App {
         if let Some(path) = self.shot.clone() {
             if self.shot_from.elapsed().as_millis() as u64 > self.shot_delay {
                 self.shot = None;
+                self.shot_sent = Some(std::time::Instant::now());
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |img| save_bmp(&path, &img))));
             }
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        // 화면 그림은 다음 프레임에 도착한다. 화면이 가만히 있으면 다음 프레임이 오지 않으므로 잠깐 더 그리게 한다.
+        if self.shot_sent.map(|t| t.elapsed().as_millis() < 1500).unwrap_or(false) {
+            ui.ctx().request_repaint();
         }
         self.pump();
         let ctx = ui.ctx().clone();
