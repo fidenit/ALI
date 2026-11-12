@@ -79,15 +79,34 @@ fn describe(text: &str) -> String {
     first_body
 }
 
-/// 기억·작업 노트의 목록 (매 턴 모델에게 보여 준다). 기록 폴더는 양이 많아 제외한다.
-pub fn index() -> String {
+/// 기억·작업 노트를 최근에 고친 순서로 돌려준다. 기록(하루치 대화)과 작업 지시서는 수가 끝없이 늘어나므로 목록에서 빼고,
+/// 필요할 때 note_search 로 찾는다. 뒤의 수는 목록에 다 싣지 못한 노트의 수.
+fn listed() -> (Vec<(String, String)>, usize) {
     let mut files = Vec::new();
     walk(&root(), &mut files);
-    files.sort();
-    let mut out = String::new();
-    for p in files.iter().filter(|p| !rel_name(p).starts_with("기록/")).take(120) {
-        let text = std::fs::read_to_string(p).unwrap_or_default();
-        out += &format!("{} — {}\n", rel_name(p), describe(&text));
+    let mut rows: Vec<(std::time::SystemTime, PathBuf)> = files
+        .into_iter()
+        .filter(|p| {
+            let r = rel_name(p);
+            !r.starts_with("기록/") && !r.starts_with("작업/지시서/")
+        })
+        .map(|p| (std::fs::metadata(&p).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH), p))
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    let more = rows.len().saturating_sub(LISTED);
+    let out = rows.iter().take(LISTED).map(|(_, p)| (rel_name(p), describe(&std::fs::read_to_string(p).unwrap_or_default()))).collect();
+    (out, more)
+}
+
+/// 목록에 싣는 노트의 수
+const LISTED: usize = 80;
+
+/// 기억·작업 노트의 목록 (매 턴 모델에게 보여 준다).
+pub fn index() -> String {
+    let (rows, more) = listed();
+    let mut out: String = rows.iter().map(|(p, d)| format!("{p} — {d}\n")).collect();
+    if more > 0 {
+        out += &format!("(최근에 고친 {LISTED}개만 적음. 이 밖에 노트 {more}개와 모든 작업 지시서·날짜별 기록이 더 있다. note_search 로 찾는다)\n");
     }
     out
 }
@@ -202,13 +221,5 @@ pub fn log_turn(r: &TurnRecord) {
 
 /// 기억·작업 노트의 (경로, 한 줄 설명) 목록.
 pub fn notes() -> Vec<(String, String)> {
-    let mut files = Vec::new();
-    walk(&root(), &mut files);
-    files.sort();
-    files
-        .iter()
-        .filter(|p| !rel_name(p).starts_with("기록/"))
-        .take(120)
-        .map(|p| (rel_name(p), describe(&std::fs::read_to_string(p).unwrap_or_default())))
-        .collect()
+    listed().0
 }

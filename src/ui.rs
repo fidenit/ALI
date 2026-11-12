@@ -145,7 +145,8 @@ impl View {
     }
 
     pub fn set_importance(&mut self, m: HashMap<String, f64>) {
-        self.importance = m;
+        // 이번에 검토한 카드의 값만 고친다 (나머지 카드의 값은 그대로 둔다).
+        self.importance.extend(m);
     }
 }
 

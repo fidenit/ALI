@@ -106,6 +106,12 @@ pub fn parse(line: &str) -> Result<Option<Op>, String> {
 
 /// 보드 전체를 수정 언어로 적는다 (모델 입력용). 이 줄들을 빈 보드에 적용하면 같은 보드가 된다.
 pub fn serialize(b: &Board) -> String {
+    serialize_with(b, &|_| 2)
+}
+
+/// 주제마다 얼마나 자세히 적을지 정해서 적는다. 2 = 전부, 1 = 카드 제목만, 0 = 주제 이름과 카드 수만.
+/// 보드가 아주 커졌을 때, 지금 이야기와 먼 주제는 줄여서 모델에게 보낸다. 줄인 주제에는 `#` 로 시작하는 안내 줄이 붙는다.
+pub fn serialize_with(b: &Board, level: &dyn Fn(&str) -> u8) -> String {
     let mut s = String::new();
     for g in &b.groups {
         s += &format!("group {} {}\n", g.id, g.name);
@@ -115,9 +121,22 @@ pub fn serialize(b: &Board) -> String {
         if let Some(g) = &t.group {
             s += &format!("put {} {}\n", t.id, g);
         }
+        let n = b.cards.iter().filter(|c| c.topic == t.id).count();
+        match level(&t.id) {
+            0 => s += &format!("# 주제 {}: 카드 {n}장 (전부 생략됨. 필요하면 board_read 로 읽는다)\n", t.id),
+            1 => s += &format!("# 주제 {}: 카드 {n}장의 제목만 적음 (내용은 board_read 로 읽는다)\n", t.id),
+            _ => {}
+        }
     }
     for c in &b.cards {
+        let lv = level(&c.topic);
+        if lv == 0 {
+            continue;
+        }
         s += &format!("card {} {} {} {}x{} {}\n", c.id, c.kind.name(), c.topic, c.w, c.h, c.title);
+        if lv == 1 {
+            continue;
+        }
         for (f, v) in &c.fields {
             s += &format!("set {} {} {}\n", c.id, f, v);
         }

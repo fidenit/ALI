@@ -7,8 +7,10 @@ mod core;
 mod decide;
 mod eleven;
 mod jev;
+mod jobs;
 mod lang;
 mod llm;
+mod memory;
 mod sys;
 mod tools;
 mod tts;
@@ -26,6 +28,15 @@ use crate::core::{Author, Board};
 const TITLE: &str = "ALI";
 /// 이 크기보다 큰 소리가 들어오면 말하는 중으로 본다.
 const MIC_THRESHOLD: f32 = 0.02;
+/// 매 턴 그대로 보여 주는 최근 대화의 수. 그보다 오래된 것은 관련 있을 때만 찾아서 보여 준다.
+const RECENT: usize = 10;
+/// 보드를 명령으로 적은 것이 이 글자 수를 넘으면, 지금 이야기와 먼 주제는 줄여서 모델에게 보낸다.
+const BOARD_FULL: usize = 12_000;
+
+fn recent_count() -> usize {
+    // 확인용: LYBOARD_RECENT=2 처럼 줄이면 오래된 대화를 찾아오는 동작을 짧은 대화로도 시험할 수 있다.
+    std::env::var("LYBOARD_RECENT").ok().and_then(|v| v.parse().ok()).unwrap_or(RECENT)
+}
 
 fn log_path() -> std::path::PathBuf {
     sys::data_dir().join("ops.log")
@@ -109,6 +120,15 @@ struct App {
     tidy: Option<Vec<String>>,
     /// 지금 도는 턴이 구성 정리인가
     tidying: bool,
+    /// 지금까지의 모든 턴 (껐다 켜도 남는다). 최근 것은 그대로, 오래된 것은 관련 있을 때 찾아서 모델에게 보인다.
+    past: memory::Past,
+    /// 주제마다 마지막으로 손댄 차례 (보드가 커지면 최근에 다룬 주제만 자세히 모델에게 보낸다)
+    touched: std::collections::HashMap<String, u64>,
+    touch_seq: u64,
+    /// 끝난 작업의 보고서 (작업 ID, 제목, 성공했는가, 보고서). 다음 턴에 메인 모델에게 전한다.
+    job_news: Vec<(String, String, bool, String)>,
+    /// 지금 도는 턴이 작업 결과를 정리하는 턴이면 그 이름
+    job_turn: Option<String>,
     /// 구성 정리를 다시 하기까지 남은 턴 수
     tidy_rest: u8,
 }
@@ -199,8 +219,17 @@ impl App {
             wake: ctx.clone(),
             tidy: None,
             tidying: false,
+            past: memory::Past::default(),
+            touched: Default::default(),
+            touch_seq: 0,
+            job_news: Vec::new(),
+            job_turn: None,
             tidy_rest: 0,
         };
+        {
+            let wake = ctx.clone();
+            jobs::init(app.tx.clone(), move || wake.request_repaint());
+        }
         sys::register_obsidian_vault(&vault::root()); // 보관함 폴더를 만들고 옵시디언에 등록해 둔다
         // 확인용: 사람이 말하지 않아도 받아쓰기와 마이크를 시험할 수 있게 한다. 결과는 data\stt.log 에 남는다.
         if let Ok(path) = std::env::var("LYBOARD_STT_FILE") {
@@ -227,6 +256,7 @@ impl App {
         if !app.cfg.demo() {
             if std::env::args().any(|a| a == "--fresh") {
                 let _ = std::fs::remove_file(log_path());
+                memory::forget_turns();
             }
             app.start_real_mode();
         }
@@ -244,7 +274,7 @@ impl App {
                 .collect();
             let groups: Vec<(String, String)> = app.board.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
             std::thread::spawn(move || {
-                let hints = decide::structure(&topics, &groups);
+                let hints = decide::structure(&topics, &groups, &[]);
                 sys::log("jev.log", &format!("구성 시험 결과: {hints:?}"));
             });
         }
@@ -264,13 +294,31 @@ impl App {
                 if let Some((who, line)) = l.split_once('\t') {
                     let by = if who == "U" { Author::User } else { Author::Ai };
                     if let Ok(Some(op)) = lang::parse(line) {
-                        let _ = self.board.apply(op, by);
+                        if self.board.apply(op, by).is_ok() {
+                            self.touch(line);
+                        }
                     }
                 }
             }
             self.board.notes.clear();
         }
         self.log = std::fs::OpenOptions::new().create(true).append(true).open(log_path()).ok();
+        // 지난번까지의 대화를 되살린다.
+        let (past, tail) = memory::Past::load(RECENT);
+        self.past = past;
+        self.recent = tail.into_iter().map(|t| (t.user, t.say)).collect();
+        // 프로그램이 꺼지면 작업자도 함께 멈춘다. 끝나지 못한 진행 카드에 그 사실을 적어 둔다.
+        let stale: Vec<String> = self
+            .board
+            .cards
+            .iter()
+            .filter(|c| c.id.starts_with("job") && c.kind == core::Kind::Progress && c.fields.get("pct").map(|p| p != "100").unwrap_or(true))
+            .filter(|c| c.fields.get("text").map(|t| !t.starts_with("멈춤") && !t.starts_with("실패")).unwrap_or(true))
+            .map(|c| c.id.clone())
+            .collect();
+        for id in stale {
+            self.apply_line(&format!("set {id} text 멈춤: 프로그램이 꺼져서 끝내지 못함"), Author::Ai);
+        }
         self.focus_input = true;
     }
 
@@ -283,6 +331,7 @@ impl App {
         };
         match result {
             Ok(()) => {
+                self.touch(line);
                 if let Some(f) = &mut self.log {
                     let _ = writeln!(f, "{}\t{}", if by == Author::User { "U" } else { "A" }, line.trim());
                 }
@@ -324,21 +373,94 @@ impl App {
         }
     }
 
+    /// 이 줄이 다룬 주제를 "방금 손댄 주제"로 적어 둔다.
+    fn touch(&mut self, line: &str) {
+        let Some(id) = line.split_whitespace().nth(1) else { return };
+        let topic = match self.board.card(id) {
+            Some(c) => c.topic.clone(),
+            None if self.board.topics.iter().any(|t| t.id == id) => id.to_string(),
+            None => return,
+        };
+        self.touch_seq += 1;
+        self.touched.insert(topic, self.touch_seq);
+    }
+
+    /// 모델에게 보낼 보드. 작을 때는 전부 보낸다. 오래 써서 커지면 지금 이야기와 가까운 주제만 자세히,
+    /// 나머지는 카드 제목만 또는 주제 이름만 보낸다 (사람이 화면을 축소해서 보는 것과 같다). 모델은 필요하면 board_read 로 더 읽는다.
+    fn board_text(&self, input: &str) -> String {
+        let full = lang::serialize(&self.board);
+        let limit = std::env::var("LYBOARD_BOARD_FULL").ok().and_then(|v| v.parse().ok()).unwrap_or(BOARD_FULL);
+        if full.chars().count() <= limit {
+            return format!("<board>\n{full}</board>\n");
+        }
+        let mut order: Vec<(&str, u64)> = self.board.topics.iter().map(|t| (t.id.as_str(), self.touched.get(&t.id).copied().unwrap_or(0))).collect();
+        order.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut level: std::collections::HashMap<&str, u8> = Default::default();
+        for (n, (id, _)) in order.iter().enumerate() {
+            level.insert(*id, if n < 6 { 2 } else if n < 20 { 1 } else { 0 });
+        }
+        // 사용자가 짚고 있는 카드의 주제, 답을 기다리는 결정이 있는 주제, 이번 말에 이름이 나온 주제는 늘 자세히.
+        if let Some(c) = self.selected.as_deref().and_then(|s| self.board.card(s)) {
+            level.insert(c.topic.as_str(), 2);
+        }
+        for c in self.board.cards.iter().filter(|c| c.kind == core::Kind::Decision) {
+            level.insert(c.topic.as_str(), 2);
+        }
+        let said = memory::grams(input);
+        for t in &self.board.topics {
+            let name = memory::grams(&t.name);
+            let shared = name.iter().filter(|g| said.binary_search(g).is_ok()).count();
+            if shared >= 2 || (!name.is_empty() && shared == name.len()) {
+                level.insert(t.id.as_str(), 2);
+            }
+        }
+        let text = lang::serialize_with(&self.board, &|t| level.get(t).copied().unwrap_or(0));
+        format!("<board detail=\"일부만\">\n{text}</board>\n")
+    }
+
     fn turn_text(&mut self, input: &str) -> String {
-        let mut t = format!("<board>\n{}</board>\n", lang::serialize(&self.board));
+        let mut t = self.board_text(input);
+        // 늘 기억하고 있는 것
+        let core = memory::core();
+        if !core.is_empty() {
+            t += &format!("<core>\n{core}\n</core>\n");
+        }
+        // 최근 대화보다 오래된 턴 가운데 이번 말과 관련 있는 것을 찾아 함께 보낸다.
+        let older = self.past.len().saturating_sub(recent_count());
+        let recalled = self.past.recall(input, older, 5);
+        if !recalled.is_empty() {
+            t += &format!("<recall>\n{recalled}</recall>\n");
+        }
         if !self.recent.is_empty() {
             t += "<recent>\n";
-            for (u, a) in self.recent.iter().rev().take(10).rev() {
+            for (u, a) in self.recent.iter().rev().take(recent_count()).rev() {
                 t += &format!("사용자: {u}\nsay: {a}\n");
             }
             t += "</recent>\n";
+        }
+        // 맡긴 작업: 돌고 있는 것과, 방금 끝나 보고서가 온 것
+        let running = jobs::summary();
+        if !running.is_empty() {
+            t += &format!("<jobs>\n{running}</jobs>\n");
+        }
+        self.job_turn = None;
+        if !self.job_news.is_empty() {
+            let names: Vec<String> = self.job_news.iter().map(|n| n.1.clone()).collect();
+            for (id, title, ok, report) in self.job_news.drain(..) {
+                t += &format!("<job_done id=\"{id}\" title=\"{title}\" state=\"{}\">\n{report}\n</job_done>\n", if ok { "끝남" } else { "끝내지 못함" });
+            }
+            if input.is_empty() && self.events.is_empty() {
+                self.job_turn = Some(names.join(", "));
+            }
         }
         if !self.events.is_empty() {
             t += &format!("<events>\n{}\n</events>\n", self.events.join("\n"));
         }
         // 판단 모델이 지난 화면을 보고 짚은 것
         // 구성 정리 턴: 판단 모델이 짚은 것을 전한다.
-        if let Some(hints) = self.tidy.take() {
+        // 사용자가 말했거나 화면을 조작해서 시작된 턴에는 끼워 넣지 않는다 (그 턴은 그 요청만 처리한다).
+        let own_turn = input.is_empty() && self.events.is_empty() && self.job_turn.is_none();
+        if let Some(hints) = if own_turn { self.tidy.take() } else { None } {
             t += &format!("<tidy>
 {}
 </tidy>
@@ -390,11 +512,16 @@ impl App {
         self.flush_speech(); // 말하는 중에 새로 말을 걸면 하던 말을 멈춘다
         self.turn_events = self.events.join(" / ");
         let text = self.turn_text(&input);
+        if std::env::var("LYBOARD_DEBUG").is_ok() {
+            debug_log("turn.log", &format!("{text}\n=====\n")); // 확인용: 모델에게 보낸 것 그대로
+        }
         self.react_at = None;
         self.busy = true;
         self.error = None;
         let auto = input.is_empty(); // 사용자가 말한 것이 아니라 프로그램이 시작한 턴
-        self.cur_input = if self.tidying {
+        self.cur_input = if let Some(names) = &self.job_turn {
+            format!("(맡긴 작업이 끝남) {names}")
+        } else if self.tidying {
             "(분류와 주제 정리)".to_string()
         } else if auto {
             format!("(화면에서 직접 조작) {}", self.turn_events)
@@ -413,7 +540,8 @@ impl App {
         let pre = llm::PreInput {
             input: if auto { String::new() } else { self.cur_input.clone() },
             topics: self.board.topics.iter().map(|t| (t.id.clone(), t.name.clone())).collect(),
-            notes: vault::notes(),
+            // 핵심 기억은 어차피 매 턴 통째로 가므로 미리 읽을 후보에서 뺀다.
+            notes: vault::notes().into_iter().filter(|(p, _)| p != memory::CORE).collect(),
             recent: self.recent.iter().rev().take(3).rev().map(|(u, a)| format!("사용자: {u}\n응답: {a}\n")).collect(),
             voice: self.voice,
         };
@@ -496,13 +624,31 @@ impl App {
         self.idle_since = std::time::Instant::now();
         self.activity.clear();
         self.pre = None;
+        // 이번 턴에 손댄 카드와 주제 (보드가 아무리 커져도 검토와 기록은 이것만 본다)
+        let mut touched_cards: Vec<String> = Vec::new();
+        for l in self.turn_raw.lines() {
+            if let Some(id) = l.split_whitespace().nth(1) {
+                if self.board.card(id).is_some() && !touched_cards.iter().any(|x| x == id) {
+                    touched_cards.push(id.to_string());
+                }
+            }
+        }
+        let mut hot_topics: Vec<String> = Vec::new();
+        for id in &touched_cards {
+            let t = self.board.card(id).map(|c| c.topic.clone()).unwrap_or_default();
+            if !hot_topics.contains(&t) {
+                hot_topics.push(t);
+            }
+        }
+        let topic_names: Vec<String> = hot_topics.iter().filter_map(|id| self.board.topics.iter().find(|t| &t.id == id).map(|t| t.name.clone())).collect();
         // 메인 모델이 화면을 고친 뒤: 판단 모델이 화면만 보고 카드마다 "무엇인지 분명한가", "얼마나 중요한가"를 본다.
         if !self.cfg.demo() && jev::key().is_some() && !self.board.cards.is_empty() {
-            let board = lang::serialize(&self.board);
-            let cards: Vec<(String, String, String)> = self
-                .board
-                .cards
+            let board = lang::serialize_with(&self.board, &|t| if hot_topics.iter().any(|h| h == t) { 2 } else { 0 });
+            let cards: Vec<(String, String, String)> = touched_cards
                 .iter()
+                .rev()
+                .take(20)
+                .filter_map(|id| self.board.card(id))
                 .map(|c| {
                     let topic = self.board.topics.iter().find(|t| t.id == c.topic).map(|t| t.name.clone()).unwrap_or_default();
                     (c.id.clone(), topic, c.title.clone())
@@ -515,23 +661,41 @@ impl App {
                 .iter()
                 .filter(|t| self.board.cards.iter().any(|c| c.topic == t.id))
                 .map(|t| {
-                    let titles: Vec<&str> = self.board.cards.iter().filter(|c| c.topic == t.id).map(|c| c.title.as_str()).collect();
+                    let titles: Vec<&str> = self.board.cards.iter().filter(|c| c.topic == t.id).take(6).map(|c| c.title.as_str()).collect();
                     (t.id.clone(), t.name.clone(), t.group.clone().unwrap_or_default(), titles.join(", "))
                 })
                 .collect();
             let groups: Vec<(String, String)> = self.board.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
             let tx = self.tx.clone();
             let wake = self.wake.clone();
+            let hot = hot_topics.clone();
             std::thread::spawn(move || {
                 if let Some(post) = decide::after(&board, &cards) {
                     let _ = tx.send(llm::Msg::Review(post));
                 }
-                let hints = decide::structure(&topics, &groups);
+                let hints = decide::structure(&topics, &groups, &hot);
                 if !hints.is_empty() {
                     let _ = tx.send(llm::Msg::Tidy(hints));
                 }
                 wake.request_repaint();
             });
+        }
+        // 이 턴을 기억에 남긴다: 턴 기록에 덧붙이고, 뒤에서 작은 모델이 오래 남길 사실을 골라 핵심 기억에 적는다.
+        if !self.cfg.demo() {
+            let (date, time) = sys::now_local();
+            let turn = memory::Turn {
+                at: format!("{date} {time}"),
+                user: self.cur_input.clone(),
+                say: self.board.say.clone(),
+                did: self.turn_actions.clone(),
+                ops: self.turn_raw.trim().chars().take(2000).collect(),
+                topics: topic_names.join(", "),
+            };
+            self.past.push(&turn);
+            if let (Some(key), false) = (self.cfg.key.clone(), self.tidying) {
+                let events = self.turn_events.clone();
+                std::thread::spawn(move || memory::keep(&key, &turn, &events));
+            }
         }
         // 방금 턴이 구성 정리였으면 한동안 다시 정리하지 않는다 (정리가 정리를 부르지 않게).
         if self.tidying {
@@ -554,6 +718,51 @@ impl App {
         self.recent.push((std::mem::take(&mut self.cur_input), self.board.say.clone()));
     }
 
+    /// 맡긴 작업의 소식을 화면에 반영한다. 작업마다 진행 카드가 하나씩 있다 (카드 ID = 작업 ID).
+    fn job_event(&mut self, ev: jobs::Event) {
+        let clip = |s: &str, n: usize| s.replace('\n', " ").chars().take(n).collect::<String>();
+        match ev {
+            jobs::Event::Started { id, title, topic } => {
+                let topic = match topic.filter(|t| self.board.topics.iter().any(|x| &x.id == t)) {
+                    Some(t) => t,
+                    None => {
+                        if !self.board.topics.iter().any(|t| t.id == "jobs") {
+                            self.apply_line("topic jobs 맡긴 작업", Author::Ai);
+                        }
+                        "jobs".to_string()
+                    }
+                };
+                self.apply_line(&format!("card {id} progress {topic} 3x2 {}", clip(&title, 40)), Author::Ai);
+                self.apply_line(&format!("set {id} pct 0"), Author::Ai);
+                self.apply_line(&format!("set {id} text 작업자가 시작함"), Author::Ai);
+            }
+            jobs::Event::Progress { id, pct, text } => {
+                if self.board.card(&id).is_none() {
+                    return;
+                }
+                if let Some(p) = pct {
+                    self.apply_line(&format!("set {id} pct {}", p.min(99)), Author::Ai);
+                }
+                if let Some(t) = text {
+                    self.apply_line(&format!("set {id} text {}", clip(&t, 60)), Author::Ai);
+                }
+            }
+            jobs::Event::Finished { id, title, ok, report } => {
+                if self.board.card(&id).is_some() {
+                    if ok {
+                        self.apply_line(&format!("set {id} pct 100"), Author::Ai);
+                        self.apply_line(&format!("set {id} text 끝남 · 결과를 정리하는 중"), Author::Ai);
+                    } else {
+                        self.apply_line(&format!("set {id} text 실패: 끝내지 못함"), Author::Ai);
+                    }
+                }
+                self.job_news.push((id, title, ok, report));
+                self.idle_since = std::time::Instant::now();
+            }
+        }
+        self.rejects.clear(); // 프로그램이 낸 명령의 거부는 모델에게 알릴 일이 아니다
+    }
+
     fn pump(&mut self) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
@@ -572,6 +781,18 @@ impl App {
                         self.turn_spoken.push(ack);
                     }
                     self.pre = Some(p);
+                }
+                llm::Msg::Job(ev) => self.job_event(ev),
+                llm::Msg::Board { topic, reply } => {
+                    let found = self.board.topics.iter().any(|t| t.id == topic);
+                    let _ = reply.send(if found {
+                        self.touch_seq += 1;
+                        self.touched.insert(topic.clone(), self.touch_seq);
+                        lang::serialize_with(&self.board, &|t| if t == topic { 2 } else { 0 }).lines().filter(|l| !l.starts_with("group ") && !l.starts_with("put ") && !l.starts_with('#') && (!l.starts_with("topic ") || l.split_whitespace().nth(1) == Some(topic.as_str()))).collect::<Vec<_>>().join("
+")
+                    } else {
+                        format!("오류: '{topic}' 라는 주제가 없음")
+                    });
                 }
                 llm::Msg::Tidy(hints) => {
                     if self.tidy_rest == 0 {
@@ -775,6 +996,10 @@ impl App {
         }
         let text: usize = self.board.cards.iter().map(card_chars).sum();
         parts.push(format!("카드 {} · 화면 글자 {}", self.board.cards.len(), text));
+        let workers = jobs::running();
+        if workers > 0 {
+            parts.push(format!("작업자 {workers}명이 일하는 중"));
+        }
         parts.push(format!("확대 {:.0}% (스크롤로 확대·축소, 빈 곳을 끌어 이동, 두 번 눌러 전체 보기)", self.view.zoom * 100.0));
         if !self.rejects.is_empty() {
             parts.push(format!("거부된 명령 {}", self.rejects.len()));
@@ -828,8 +1053,15 @@ impl eframe::App for App {
         }
         let talking = self.tts.is_speaking() || !self.speech.is_empty();
         self.voice_input(&ctx, talking);
-        // 구성 정리: 판단 모델이 고칠 것을 짚었고 사용자가 잠깐 쉬고 있으면, 묻지 않고 한 번 정리한다.
-        if self.tidy.is_some() {
+        // 맡긴 작업이 끝났으면, 사용자가 말하고 있지 않을 때 그 결과를 화면에 정리하는 턴을 돈다.
+        if !self.job_news.is_empty() {
+            let quiet = !self.busy && self.react_at.is_none() && !talking && self.stt.is_none() && !(self.mic.is_some() && self.heard);
+            if quiet && self.input.trim().is_empty() && self.idle_since.elapsed().as_millis() > 700 {
+                self.start_turn(&ctx, String::new());
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        } else if self.tidy.is_some() {
             let quiet = !self.busy && self.react_at.is_none() && !talking && self.stt.is_none() && !(self.mic.is_some() && self.heard);
             if quiet && self.input.trim().is_empty() && self.autoplay.is_empty() && self.idle_since.elapsed().as_millis() > 2500 {
                 self.start_turn(&ctx, String::new());
@@ -838,7 +1070,7 @@ impl eframe::App for App {
             }
         }
         if !self.autoplay.is_empty() {
-            if !self.busy && !talking && self.idle_since.elapsed().as_millis() > 1200 {
+            if !self.busy && !talking && self.job_news.is_empty() && self.idle_since.elapsed().as_millis() > 1200 {
                 // 확인용 대본에서는 "|" 가 입력 구분자라서, 조작 줄 안의 "|" 는 "¦" 로 적는다.
                 let next = self.autoplay.pop_front().unwrap_or_default().replace('¦', "|");
                 if let Some(line) = next.strip_prefix('!') {

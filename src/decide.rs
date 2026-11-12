@@ -185,7 +185,8 @@ pub fn after(board: &str, cards: &[(String, String, String)]) -> Option<Post> {
 /// 돌려준 것이 있으면 프로그램이 한가할 때 메인 모델에게 "구성 정리"를 시킨다.
 ///
 /// `topics` 는 (ID, 이름, 분류 ID(없으면 빈 문자열), 카드 제목들), `groups` 는 (ID, 이름).
-pub fn structure(topics: &[(String, String, String, String)], groups: &[(String, String)]) -> Vec<String> {
+/// `hot` 은 이번 턴에 손댄 주제. 주제가 많아지면 모든 쌍을 볼 수 없으므로, 손댄 주제가 낀 쌍부터 본다.
+pub fn structure(topics: &[(String, String, String, String)], groups: &[(String, String)], hot: &[String]) -> Vec<String> {
     let mut hints = Vec::new();
     // 따져 볼 것도 없이 분명한 것들
     if !groups.is_empty() {
@@ -225,11 +226,13 @@ pub fn structure(topics: &[(String, String, String, String)], groups: &[(String,
     let mut pairs = Vec::new();
     for i in 0..topics.len() {
         for j in i + 1..topics.len() {
-            if topics[i].2 == topics[j].2 && pairs.len() < 18 {
+            if topics[i].2 == topics[j].2 {
                 pairs.push((i, j));
             }
         }
     }
+    pairs.sort_by_key(|(i, j)| !(hot.contains(&topics[*i].0) || hot.contains(&topics[*j].0)));
+    pairs.truncate(18);
     for (n, (i, j)) in pairs.iter().enumerate() {
         q.insert(
             format!("same{n}"),

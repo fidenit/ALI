@@ -19,6 +19,10 @@ pub enum Msg {
     Review(crate::decide::Post),
     /// 판단 모델이 분류·주제의 구성에서 고칠 만한 것을 짚었다
     Tidy(Vec<String>),
+    /// 맡긴 작업의 소식 (시작, 진행, 끝)
+    Job(crate::jobs::Event),
+    /// 보드에서 주제 하나의 내용을 전부 읽어 달라는 요청 (보드가 커서 줄여 보냈을 때)
+    Board { topic: String, reply: Sender<String> },
     Done(Stats),
     Error(String),
 }

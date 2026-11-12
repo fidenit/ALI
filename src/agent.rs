@@ -12,15 +12,59 @@ const URL: &str = "https://api.anthropic.com/v1/messages";
 /// 한 턴에서 도구를 주고받는 횟수의 상한
 const MAX_STEPS: usize = 80;
 
-fn body(cfg: &Config, messages: &[Value], fallbacks: bool) -> String {
+/// 누가 일하는가: 메인(화면을 고치는 쪽)인지 맡은 작업자인지에 따라 지시문과 도구가 다르다.
+pub struct Role<'a> {
+    pub system: &'a str,
+    pub tools: Value,
+    pub max_steps: usize,
+    /// 도구를 한 차례 쓴 뒤마다 불린다. Err 면 거기서 멈추고, Ok(Some(글)) 이면 그 글을 모델에게 함께 전한다.
+    pub check: &'a dyn Fn() -> Result<Option<String>, String>,
+    /// 이 역할만의 도구 처리. None 이면 공통 도구로 실행한다.
+    pub tool: &'a dyn Fn(&str, &Value) -> Option<(String, bool)>,
+}
+
+pub fn http() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        // OS 의 TLS 구현과 OS 인증서 저장소를 쓴다 (Windows: Schannel, Mac: Secure Transport).
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::NativeTls)
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
+/// 도구 없이 한 번 묻고 답을 글로 받는다 (기억 정리 같은 작은 뒷일에 쓴다).
+pub fn ask(key: &str, model: &str, system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
+    let body = json!({ "model": model, "max_tokens": max_tokens, "system": system, "messages": [{ "role": "user", "content": user }] }).to_string();
+    let mut resp = http()
+        .post(URL)
+        .header("content-type", "application/json")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2026-10-21")
+        .send(body)
+        .map_err(|e| format!("연결 실패: {e}"))?;
+    let status = resp.status().as_u16();
+    let text = resp.body_mut().read_to_string().unwrap_or_default();
+    if status != 200 {
+        return Err(api_error(status, &text));
+    }
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(v["content"].as_array().map(|a| a.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("")).unwrap_or_default())
+}
+
+fn body(cfg: &Config, role: &Role, messages: &[Value], fallbacks: bool) -> String {
     let mut v = json!({
         "model": cfg.model,
         "max_tokens": 32000,
         "stream": true,
         "output_config": { "effort": cfg.effort },
         // 지시문은 매 턴 같으므로 여기까지를 캐시한다.
-        "system": [{ "type": "text", "text": SYSTEM, "cache_control": { "type": "ephemeral" } }],
-        "tools": crate::tools::definitions(),
+        "system": [{ "type": "text", "text": role.system, "cache_control": { "type": "ephemeral" } }],
+        "tools": role.tools,
         // 한 턴 안에서 도구를 여러 번 쓰는 동안 쌓이는 내용도 캐시한다.
         "cache_control": { "type": "ephemeral" },
         "messages": messages,
@@ -40,24 +84,20 @@ struct Reply {
 }
 
 pub fn run(cfg: &Config, key: &str, turn_text: &str, send: &dyn Fn(Msg)) -> Result<Stats, String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        // OS 의 TLS 구현과 OS 인증서 저장소를 쓴다 (Windows: Schannel, Mac: Secure Transport).
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .provider(ureq::tls::TlsProvider::NativeTls)
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
-        .http_status_as_error(false)
-        .build()
-        .into();
+    let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| Ok(None), tool: &|_, _| None };
+    run_as(cfg, key, &role, turn_text, send).map(|(stats, _)| stats)
+}
+
+/// 모델이 일을 끝낼 때까지 돌린다. 마지막 응답의 글도 함께 돌려준다 (작업자의 보고서).
+pub fn run_as(cfg: &Config, key: &str, role: &Role, turn_text: &str, send: &dyn Fn(Msg)) -> Result<(Stats, String), String> {
+    let agent = http();
     let started = Instant::now();
     let mut stats = Stats { model: cfg.model.clone(), ..Default::default() };
     let mut fallbacks = true;
     let mut messages = vec![json!({ "role": "user", "content": turn_text })];
 
-    for _ in 0..MAX_STEPS {
-        let reply = stream_once(&agent, cfg, key, &messages, &mut fallbacks, &mut stats, started, send)?;
+    for _ in 0..role.max_steps {
+        let reply = stream_once(&agent, cfg, key, role, &messages, &mut fallbacks, &mut stats, started, send)?;
         send(Msg::Delta("\n".into())); // 응답 사이에 줄이 붙지 않게 한다
         // 빈 글 블록은 되돌려 보낼 수 없다.
         let content: Vec<Value> =
@@ -76,6 +116,14 @@ pub fn run(cfg: &Config, key: &str, turn_text: &str, send: &dyn Fn(Msg)) -> Resu
                         let (rtx, rrx) = std::sync::mpsc::channel();
                         send(Msg::Screen { ops: input["ops"].as_str().unwrap_or("").to_string(), reply: rtx });
                         (rrx.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|_| "반영됨".into()), false)
+                    } else if name == "board_read" {
+                        send(Msg::Activity(crate::tools::describe(name, input)));
+                        let (rtx, rrx) = std::sync::mpsc::channel();
+                        send(Msg::Board { topic: input["topic"].as_str().unwrap_or("").trim().to_string(), reply: rtx });
+                        match rrx.recv_timeout(Duration::from_secs(15)) {
+                            Ok(out) => (out.clone(), out.starts_with("오류:")),
+                            Err(_) => ("오류: 보드를 읽지 못함".into(), true),
+                        }
                     } else if name == "browser_text" || name == "browser_eval" {
                         // 브라우저 화면도 화면 쪽 스레드에 있다. 스크립트를 넘기고 결과를 기다린다.
                         send(Msg::Activity(crate::tools::describe(name, input)));
@@ -92,9 +140,13 @@ pub fn run(cfg: &Config, key: &str, turn_text: &str, send: &dyn Fn(Msg)) -> Resu
                         }
                     } else {
                         send(Msg::Activity(crate::tools::describe(name, input)));
-                        crate::tools::execute(name, input)
+                        (role.tool)(name, input).unwrap_or_else(|| crate::tools::execute(name, input))
                     };
                     results.push(json!({ "type": "tool_result", "tool_use_id": b["id"], "content": out, "is_error": is_error }));
+                }
+                // 멈추라는 신호나 중간에 전할 말이 있는지 본다.
+                if let Some(more) = (role.check)()? {
+                    results.push(json!({ "type": "text", "text": more }));
                 }
                 // 도구 결과는 한 메시지에 모두 담아 돌려준다.
                 messages.push(json!({ "role": "user", "content": results }));
@@ -106,11 +158,12 @@ pub fn run(cfg: &Config, key: &str, turn_text: &str, send: &dyn Fn(Msg)) -> Resu
             "max_tokens" => return Err("출력이 한도에서 잘렸습니다".into()),
             _ => {
                 stats.total_ms = started.elapsed().as_millis() as u64;
-                return Ok(stats);
+                let text: Vec<&str> = content.iter().filter_map(|b| if b["type"] == "text" { b["text"].as_str() } else { None }).collect();
+                return Ok((stats, text.join("\n")));
             }
         }
     }
-    Err(format!("한 번에 {MAX_STEPS}단계를 넘겨 중단했습니다"))
+    Err(format!("한 번에 {}단계를 넘겨 중단했습니다", role.max_steps))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -118,6 +171,7 @@ fn stream_once(
     agent: &ureq::Agent,
     cfg: &Config,
     key: &str,
+    role: &Role,
     messages: &[Value],
     fallbacks: &mut bool,
     stats: &mut Stats,
@@ -133,7 +187,7 @@ fn stream_once(
         if fallbacks {
             req = req.header("anthropic-beta", "server-side-fallback-2026-07-01");
         }
-        req.send(body(cfg, messages, fallbacks)).map_err(|e| format!("연결 실패: {e}"))
+        req.send(body(cfg, role, messages, fallbacks)).map_err(|e| format!("연결 실패: {e}"))
     };
     let mut resp = post(*fallbacks)?;
     if resp.status().as_u16() == 400 && *fallbacks {
