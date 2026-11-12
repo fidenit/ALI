@@ -100,6 +100,9 @@ pub enum Op {
     Pin { id: String, on: bool },
     Focus { id: String },
     Say { text: String },
+    /// 주제를 카드째로 보관함에 내린다 / 다시 꺼낸다
+    Archive { topic: String },
+    Restore { topic: String },
 }
 
 /// 분류: 주제들을 묶는 한 단계 위의 묶음 ("사적", "회사" 같은 넓은 영역).
@@ -148,11 +151,20 @@ impl Card {
     }
 }
 
+/// 보관된 주제 하나: 화면에서는 내려갔지만 카드째로 남아 있어서 언제든 다시 꺼낼 수 있다.
+#[derive(Clone, Debug)]
+pub struct Shelved {
+    pub topic: Topic,
+    pub cards: Vec<Card>,
+}
+
 #[derive(Default)]
 pub struct Board {
     pub groups: Vec<Group>,
     pub topics: Vec<Topic>,
     pub cards: Vec<Card>,
+    /// 보관함. 끝났거나 오래 손대지 않은 주제가 여기로 내려간다.
+    pub shelf: Vec<Shelved>,
     pub say: String,
     pub focus: Option<String>,
     /// 한도 초과로 잘린 것 등, 다음 턴에 모델에게 알려줄 내용.
@@ -191,6 +203,9 @@ impl Board {
             Op::Topic { id, name } => {
                 if !valid_id(&id) {
                     return Err(format!("주제 ID '{id}' 형식 오류"));
+                }
+                if self.shelf.iter().any(|s| s.topic.id == id) {
+                    return Err(format!("주제 '{id}' 는 보관되어 있음. 다시 쓰려면 restore {id} 로 꺼낸다"));
                 }
                 let name = clip(if name.is_empty() { &id } else { &name }, 24);
                 match self.topics.iter_mut().find(|t| t.id == id) {
@@ -234,6 +249,9 @@ impl Board {
                 t.group = Some(group);
             }
             Op::Card { id, kind, topic, size, title } => {
+                if self.shelf.iter().any(|s| s.cards.iter().any(|c| c.id == id)) {
+                    return Err(format!("카드 ID '{id}' 는 보관된 주제의 카드가 쓰고 있음. 다른 ID 를 쓴다"));
+                }
                 if !valid_id(&id) {
                     return Err(format!("카드 ID '{id}' 형식 오류"));
                 }
@@ -363,6 +381,29 @@ impl Board {
                 self.card_mut(&id)?;
                 self.focus = Some(id);
             }
+            Op::Archive { topic } => {
+                let at = self.topics.iter().position(|t| t.id == topic).ok_or_else(|| format!("주제 '{topic}' 없음"))?;
+                let t = self.topics.remove(at);
+                let (gone, kept): (Vec<Card>, Vec<Card>) = std::mem::take(&mut self.cards).into_iter().partition(|c| c.topic == topic);
+                self.cards = kept;
+                if self.focus.as_ref().map(|f| gone.iter().any(|c| &c.id == f)).unwrap_or(false) {
+                    self.focus = None;
+                }
+                self.shelf.push(Shelved { topic: t, cards: gone });
+            }
+            Op::Restore { topic } => {
+                let at = self.shelf.iter().position(|s| s.topic.id == topic).ok_or_else(|| format!("보관함에 주제 '{topic}' 없음"))?;
+                let mut s = self.shelf.remove(at);
+                // 보관해 둔 사이에 분류가 없어졌으면 미분류로 꺼낸다.
+                if s.topic.group.as_ref().map(|g| !self.groups.iter().any(|x| &x.id == g)).unwrap_or(false) {
+                    s.topic.group = None;
+                }
+                self.topics.push(s.topic);
+                for mut c in s.cards {
+                    c.rev += 1;
+                    self.cards.push(c);
+                }
+            }
             Op::Say { text } => {
                 if chars(&text) > 80 {
                     self.notes.push("say 80자 초과로 잘림".into());
@@ -413,5 +454,28 @@ impl Board {
         c.rev += 1;
         self.notes.extend(note);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shelf_tests {
+    use super::*;
+
+    #[test]
+    fn archive_and_restore_keep_cards() {
+        let mut b = Board::default();
+        let run = |b: &mut Board, line: &str| b.apply(crate::lang::parse(line).unwrap().unwrap(), Author::Ai);
+        run(&mut b, "topic trip 제주 여행").unwrap();
+        run(&mut b, "card k1 note trip 메모").unwrap();
+        run(&mut b, "set k1 text 숙소는 애월").unwrap();
+        run(&mut b, "archive trip").unwrap();
+        assert!(b.topics.is_empty() && b.cards.is_empty() && b.shelf.len() == 1);
+        // 보관된 것과 같은 ID 로 새로 만들 수 없다 (꺼낼 때 부딪히지 않게).
+        assert!(run(&mut b, "topic trip 다른 여행").is_err());
+        run(&mut b, "topic t2 다른 주제").unwrap();
+        assert!(run(&mut b, "card k1 note t2 겹침").is_err());
+        run(&mut b, "restore trip").unwrap();
+        assert_eq!(b.card("k1").unwrap().field("text"), "숙소는 애월");
+        assert!(b.shelf.is_empty());
     }
 }

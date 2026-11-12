@@ -94,6 +94,8 @@ pub fn parse(line: &str) -> Result<Option<Op>, String> {
                 _ => return Err("move <id> <열> <행>".into()),
             }
         }
+        "archive" => Op::Archive { topic: need(rest, "archive <주제ID>")?.into() },
+        "restore" => Op::Restore { topic: need(rest, "restore <주제ID>")?.into() },
         "pin" | "unpin" => Op::Pin { id: need(rest, "ID")?.into(), on: cmd == "pin" },
         "focus" => Op::Focus { id: need(rest, "ID")?.into() },
         "say" => Op::Say { text: rest.into() },

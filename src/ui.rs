@@ -63,7 +63,7 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-fn font(size: f32) -> FontId {
+pub fn font(size: f32) -> FontId {
     FontId::proportional(size)
 }
 pub fn bold(size: f32) -> FontId {
@@ -126,6 +126,10 @@ pub struct View {
     importance: HashMap<String, f64>,
     /// 판에서 지금 보고 있는 범위 (확대·축소와 이동의 결과)
     scene: Option<Rect>,
+    /// 보는 범위가 벗어날 수 없는 한계
+    limit: Option<Rect>,
+    /// 지난 프레임의 "전체 보기" 범위
+    fit: Option<Rect>,
     /// 다른 곳으로 날아가는 중: (출발 범위, 도착 범위, 시작 시각)
     fly: Option<(Rect, Rect, f64)>,
     /// 지금의 이동이 "더 축소할 수 없어서 튕겨 돌아오는 것"인가
@@ -136,10 +140,26 @@ pub struct View {
     pub zoom: f32,
     /// 다음 프레임에 화면에 들어오게 할 주제
     goto: Option<String>,
+    /// 지금 사용자 앞에 가져다 놓은 일 (결정 카드의 ID). 이 카드는 판이 아니라 왼쪽의 "내 차례" 자리에 그린다.
+    pub task: Option<String>,
+    /// 왼쪽 "내 차례" 자리의 화면 위치 (대화 구역이 정해 준다)
+    pub task_rect: Option<Rect>,
+    /// 이 주제의 구역을 "내 차례" 자리 바로 옆에 붙여 보여 달라는 예약
+    dock: Option<String>,
 }
 
 impl View {
     /// 이 주제가 화면에 보이게 해 달라고 예약한다 (안 보이거나 너무 작으면 그쪽으로 날아간다).
+    /// 지금 보고 있는 범위와, 벗어날 수 없는 범위 (확인용으로 밖에서 읽는다).
+    pub fn seen(&self) -> Option<(Rect, Rect)> {
+        Some((self.scene?, self.limit?))
+    }
+
+    /// 사용자 앞에 가져온 일이 속한 주제를, 그 일 바로 옆(판의 왼쪽 위)에 붙여 보여 준다.
+    pub fn dock_topic(&mut self, topic: String) {
+        self.dock = Some(topic);
+    }
+
     pub fn want_topic(&mut self, topic: String) {
         self.goto = Some(topic);
     }
@@ -212,12 +232,10 @@ struct Zone {
 fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox: bool) -> (HashMap<String, Slot>, Vec<Zone>) {
     let cells = |avail: f32| (((avail - 2.0 * ZONE_PAD + GAP) / (CW + GAP)).floor() as i32).max(2);
     // 답이 필요한 카드(decision)는 주제 구역에 두지 않고 오른쪽 "내 차례" 구역으로 모은다.
-    let asks: Vec<&Card> = board.cards.iter().filter(|c| c.kind == Kind::Decision).collect();
-    let inbox_w = INBOX_COLS as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD;
-    let full_width = width;
-    let width = if asks.is_empty() || !with_inbox { width } else { (width - inbox_w - ZONE_GAP).max(CW * 3.0) };
+    let asks: Vec<&Card> = board.cards.iter().filter(|c| view.task.as_deref() == Some(c.id.as_str())).collect();
+    let away = |c: &Card| view.task.as_deref() == Some(c.id.as_str());
     let topics: Vec<&crate::core::Topic> =
-        board.topics.iter().filter(|t| only.map(|g| t.group.as_deref().unwrap_or("") == g).unwrap_or(true)).filter(|t| board.cards.iter().any(|c| c.topic == t.id && c.kind != Kind::Decision)).collect();
+        board.topics.iter().filter(|t| only.map(|g| t.group.as_deref().unwrap_or("") == g).unwrap_or(true)).filter(|t| board.cards.iter().any(|c| c.topic == t.id && !away(c))).collect();
     let half = cells((width - ZONE_GAP) / 2.0);
     let limit = if topics.len() >= 2 && half >= 4 { half } else { cells(width) };
 
@@ -235,7 +253,7 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
                 }
             }
         };
-        let mine: Vec<&Card> = board.cards.iter().filter(|c| c.topic == t.id && c.kind != Kind::Decision).collect();
+        let mine: Vec<&Card> = board.cards.iter().filter(|c| c.topic == t.id && !away(c)).collect();
         for c in mine.iter().filter(|c| c.grid.is_some()) {
             let (col, row) = c.grid.unwrap();
             let (w, h) = (width_of(c), eff_h(c, view));
@@ -281,19 +299,14 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
         x += size.x + ZONE_GAP;
         shelf_h = shelf_h.max(size.y);
     }
-    // "내 차례" 구역: 화면 오른쪽 끝에 세로로 쌓는다. 급한 것(나중에 온 것)이 위로 온다.
-    if with_inbox && !asks.is_empty() {
-        let min = vec2((full_width - inbox_w).max(0.0), 0.0);
-        let origin = min + vec2(ZONE_PAD, ZONE_HEAD);
-        let mut row = 0;
-        for c in asks.iter().rev() {
+    // "내 차례": 지금 사용자 앞에 가져온 일 하나. 판이 아니라 왼쪽 자리에 그리므로 위치는 그 자리의 왼쪽 위(0, 0) 기준이다.
+    if with_inbox {
+        if let Some(c) = asks.first() {
             let h = eff_h(c, view);
-            let pos = origin + vec2(0.0, row as f32 * (CH + GAP));
-            slots.insert(c.id.clone(), Slot { pos, w: INBOX_COLS, h, col: 0, row, origin, limit: INBOX_COLS, sticky: true });
-            row += h;
+            slots.insert(c.id.clone(), Slot { pos: vec2(0.0, 0.0), w: INBOX_COLS, h, col: 0, row: 0, origin: vec2(0.0, 0.0), limit: INBOX_COLS, sticky: true });
+            let size = vec2(INBOX_COLS as f32 * (CW + GAP) - GAP, h as f32 * (CH + GAP) - GAP);
+            zones.push(Zone { id: INBOX_ID.into(), name: "내 차례".into(), min: vec2(0.0, 0.0), size, inbox: true });
         }
-        let size = vec2(inbox_w, ZONE_HEAD + row as f32 * (CH + GAP) - GAP + ZONE_PAD);
-        zones.push(Zone { id: INBOX_ID.into(), name: "내 차례".into(), min, size, inbox: true });
     }
     (slots, zones)
 }
@@ -456,7 +469,9 @@ pub fn board(
         let (inbox_slots, inbox_zones) = layout(board, INBOX_COLS as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD, view, Some(NO_GROUP), true);
         let inbox = inbox_zones.into_iter().find(|z| z.inbox);
         // "내 차례" 구역이 오른쪽을 가리므로, 내용은 그 왼쪽 자리에 맞춘다.
-        let covered = inbox.as_ref().map(|z| z.size.x + ZONE_GAP).unwrap_or(0.0);
+        let covered = 0.0_f32;
+        let task_id = view.task.clone();
+        let task_topic = task_id.as_ref().and_then(|id| board.card(id)).map(|c| c.topic.clone());
         // 판은 "내 차례" 구역의 왼쪽만 쓴다. 판 위의 내용이 그 구역 밑으로 들어가 가려지는 일이 없다.
         let area = Rect::from_min_max(full_area.min, pos2((full_area.right() - covered).max(full_area.left() + 200.0), full_area.bottom()));
         let open = area.size();
@@ -475,12 +490,39 @@ pub fn board(
             let lift = ((f.height() - bounds.height()) * 0.5 - 30.0).max(0.0);
             widen(f.translate(vec2(0.0, lift)))
         };
+        // 볼 수 있는 범위의 끝. 내용이 있는 곳까지만 갈 수 있고, 그 밖의 빈 곳으로는 넘어가지 않는다.
+        let limit = everything.union(bounds.expand(30.0));
+        view.limit = Some(limit);
+        // 보는 범위를 한계 안으로 되돌린 자리. 보는 범위가 한계보다 크면(전체 보기) 왼쪽 위에 맞춘다.
+        let inside = |r: Rect| {
+            let axis = |min: f32, size: f32, lo: f32, hi: f32| if size >= hi - lo { lo } else { min.clamp(lo, hi - size) };
+            Rect::from_min_size(pos2(axis(r.min.x, r.width(), limit.min.x, limit.max.x), axis(r.min.y, r.height(), limit.min.y, limit.max.y)), r.size())
+        };
         let mut scene = view.scene.unwrap_or(Rect::NOTHING);
         if !(scene.is_finite() && scene.width() > 1.0) {
             scene = everything;
             // 확인용: LYBOARD_ZOOM=0.3 처럼 주면 그 비율로 왼쪽 위부터 보여 준다.
             if let Some(z) = std::env::var("LYBOARD_ZOOM").ok().and_then(|v| v.parse::<f32>().ok()) {
                 scene = Rect::from_min_size(bounds.min - vec2(20.0, 20.0), area.size() / z.clamp(0.05, 1.0));
+            }
+        }
+        // 전체를 보고 있었는데 내용이 늘거나 줄었으면(주제가 생김, 보관됨, 다시 꺼냄) 새 전체에 다시 맞춘다.
+        if let Some(prev) = view.fit {
+            let same = |a: Rect, b: Rect| (a.min - b.min).length() < 2.0 && (a.max - b.max).length() < 2.0;
+            if same(scene, prev) && !same(prev, everything) && view.fly.is_none() {
+                view.fly = Some((scene, everything, now));
+            }
+        }
+        view.fit = Some(everything);
+        // 사용자 앞에 일을 가져왔으면, 그 일이 속한 구역을 판의 왼쪽 위(그 일 바로 옆)에 붙인다. 주변의 다른 일이 함께 보인다.
+        if let Some(topic) = view.dock.take() {
+            if let Some(z) = zones.iter().find(|z| z.id == topic) {
+                let zr = Rect::from_min_size(z.min.to_pos2(), z.size);
+                // 구역이 다 들어오는 크기로, 그러나 읽을 수 있는 크기 아래로는 줄이지 않는다.
+                let k = (open.x / (zr.width() + 60.0)).min(open.y / (zr.height() + 60.0)).clamp(READABLE, 1.0);
+                view.fly = Some((scene, inside(widen(Rect::from_min_size(zr.min - vec2(24.0, 24.0), open / k))), now));
+                view.bounce = false;
+                view.goto = None;
             }
         }
         // AI 가 방금 고친 주제가 화면 밖에 있거나 너무 작게 보이면 그쪽으로 날아간다.
@@ -492,7 +534,7 @@ pub fn board(
                     // 구역이 커서 한 화면에 안 들어오면, 읽을 수 있는 크기를 지키고 구역의 왼쪽 위부터 보여 준다.
                     let fitted = frame(zr.expand(40.0), open, 1.0);
                     let target = if open.x / fitted.width() < READABLE { Rect::from_min_size(zr.min - vec2(30.0, 30.0), open / READABLE) } else { fitted };
-                    view.fly = Some((scene, widen(target), now));
+                    view.fly = Some((scene, inside(widen(target)), now));
                 }
             }
         }
@@ -673,7 +715,7 @@ pub fn board(
             }
 
             // 제목 오른쪽에 붙는 것(주제 이름, 완료 개수, 고정 표시)의 폭만큼 제목 자리를 줄여서 글자가 겹치지 않게 한다.
-            let topic_label = if c.kind == Kind::Decision { board.topics.iter().find(|t| t.id == c.topic).map(|t| t.name.clone()).unwrap_or_default() } else { String::new() };
+            let topic_label = if sticky_pass { board.topics.iter().find(|t| t.id == c.topic).map(|t| t.name.clone()).unwrap_or_default() } else { String::new() };
             let reserved = if !topic_label.is_empty() {
                 p.layout_no_wrap(topic_label.clone(), font(11.0), DIM).size().x + 14.0
             } else if c.kind == Kind::Checklist && !c.items.is_empty() {
@@ -690,7 +732,7 @@ pub fn board(
             let mut sp = p.with_clip_rect(side_clip.intersect(p.clip_rect()));
             sp.set_opacity(alpha * title_a);
             // "내 차례" 구역의 카드는 주제 구역 밖에 있으므로, 어느 주제의 질문인지 제목 옆에 적는다.
-            if c.kind == Kind::Decision {
+            if sticky_pass {
                 let topic = board.topics.iter().find(|t| t.id == c.topic).map(|t| t.name.as_str()).unwrap_or("");
                 sp.text(pos2(rect.right() - if c.pinned { 34.0 } else { PAD }, rect.top() + 19.0), Align2::RIGHT_TOP, topic, font(11.0), ORANGE.gamma_multiply(0.85));
             }
@@ -825,7 +867,11 @@ pub fn board(
                 zp.set_opacity(appear * if grouped { 1.0 - far * 0.75 } else { 1.0 });
                 zp.rect_filled(r, 26.0, mix(ZONE, RAISED, (1.0 - cards_seen) * 0.6));
                 zp.rect_stroke(r, 26.0, Stroke::new((1.0 / zoom).min(5.0), ZONE_EDGE), StrokeKind::Inside);
-                let count = board.cards.iter().filter(|c| c.topic == z.id && c.kind != Kind::Decision).count();
+                // 지금 사용자 앞에 가져온 일이 속한 구역: 주황색 테두리로 "이 일의 자리"임을 보인다.
+                if task_topic.as_deref() == Some(z.id.as_str()) {
+                    zp.rect_stroke(r, 26.0, Stroke::new((1.5 / zoom).min(7.0), ORANGE.gamma_multiply(0.75)), StrokeKind::Inside);
+                }
+                let count = board.cards.iter().filter(|c| c.topic == z.id && task_id.as_deref() != Some(c.id.as_str())).count();
                 if cards_seen > 0.02 {
                     // 가까이: 구역 위쪽에 이름과 카드 수 (카드가 보이는 단계)
                     let mut np = zp.with_clip_rect(Rect::from_min_size(r.min, vec2(r.width() - 8.0, ZONE_HEAD)).intersect(zp.clip_rect()));
@@ -863,38 +909,37 @@ pub fn board(
         if shown.response.double_clicked() {
             view.fly = Some((scene, everything, now));
         }
+        // 끌어서 옮길 때: 내용의 끝을 넘어가지 않는다. 끝에서는 조금만 당겨지고(화면에서 70픽셀까지), 손을 떼면 튕겨 돌아온다.
+        if view.fly.is_none() && area.width() / scene.width() >= fit_zoom * 0.995 {
+            let home = inside(scene);
+            let over = scene.min - home.min;
+            if over.length() > 0.5 {
+                let give = 70.0 / zoom;
+                scene = home.translate(vec2(over.x.clamp(-give, give), over.y.clamp(-give, give)));
+                let held = ui.input(|i| i.pointer.any_down());
+                if !held && !pulling {
+                    view.fly = Some((scene, home, now));
+                    view.bounce = true;
+                }
+                moving = true;
+            }
+        }
         view.scene = Some(scene);
         view.zoom = zoom;
 
-        // ---- "내 차례": 판 위에 겹쳐서 화면 오른쪽에 고정 ----
-        if let Some(z) = &inbox {
+        // ---- "내 차례": 왼쪽 대화 구역이 비워 둔 자리에, 지금 처리할 일 하나를 그린다 ----
+        if let (Some(z), Some(slot)) = (&inbox, view.task_rect) {
             let over_layer = egui::LayerId::new(parent_layer.order, ui.scope_id().with("inbox_layer"));
             ui.ctx().set_sublayer(parent_layer, over_layer);
-            let mut over = ui.new_child(egui::UiBuilder::new().layer_id(over_layer).max_rect(full_area).sense(Sense::hover()));
-            over.set_clip_rect(full_area);
-            // 답할 것이 많아 화면보다 길어지면, 이 구역 위에서 스크롤해 넘겨 본다.
-            let reach = (z.size.y - full_area.height()).max(0.0);
-            let home = Rect::from_min_size(pos2(full_area.right() - z.size.x, full_area.top()), vec2(z.size.x, full_area.height()));
-            if ui.rect_contains_pointer(home) {
+            let mut over = ui.new_child(egui::UiBuilder::new().layer_id(over_layer).max_rect(slot).sense(Sense::hover()));
+            over.set_clip_rect(slot);
+            // 선택지가 많아 자리보다 길면, 이 자리 위에서 스크롤해 넘겨 본다.
+            let reach = (z.size.y - slot.height()).max(0.0);
+            if ui.input(|i| i.pointer.hover_pos()).map(|p| slot.contains(p)).unwrap_or(false) {
                 view.inbox_scroll -= ui.input(|i| i.smooth_scroll_delta.y);
             }
             view.inbox_scroll = view.inbox_scroll.clamp(0.0, reach);
-            let r = Rect::from_min_size(pos2(full_area.right() - z.size.x, full_area.top() - view.inbox_scroll), z.size);
-            // 뒤의 판이 눌리거나 끌리지 않게 이 자리를 차지한다.
-            over.interact(home, over.scope_id().with("inbox-bg"), Sense::click_and_drag());
-            let zp = over.painter().clone();
-            zp.rect_filled(r, 26.0, ZONE);
-            // AI 가 답을 받으러 온 것들. 주황색 테두리와 점으로 눈에 띄게 한다.
-            zp.rect_stroke(r, 26.0, Stroke::new(1.0, mix(ZONE_EDGE, ORANGE, 0.55)), StrokeKind::Inside);
-            let count = board.cards.iter().filter(|c| c.kind == Kind::Decision).count();
-            let pulse = ((now * 2.4).sin() * 0.5 + 0.5) as f32;
-            let dot = r.min + vec2(ZONE_PAD + 13.0, 22.0);
-            zp.circle_filled(dot, 4.0 + 3.0 * pulse, ORANGE.gamma_multiply(0.25 * (1.0 - pulse)));
-            zp.circle_filled(dot, 4.0, ORANGE);
-            let tr = zp.text(r.min + vec2(ZONE_PAD + 26.0, 13.0), Align2::LEFT_TOP, &z.name, bold(15.0), TEXT);
-            zp.text(pos2(tr.right() + 10.0, tr.center().y), Align2::LEFT_CENTER, format!("{count}"), bold(12.5), ORANGE);
-            moving = true;
-            draw_cards(&mut over, true, r.min, 1.0);
+            draw_cards(&mut over, true, slot.min - vec2(0.0, view.inbox_scroll), 1.0);
         }
         drop(draw_cards);
         moving |= busy;

@@ -32,6 +32,16 @@ const MIC_THRESHOLD: f32 = 0.02;
 const RECENT: usize = 10;
 /// 보드를 명령으로 적은 것이 이 글자 수를 넘으면, 지금 이야기와 먼 주제는 줄여서 모델에게 보낸다.
 const BOARD_FULL: usize = 12_000;
+/// 이 날수만큼 손대지 않은 주제는 보관하자고 짚는다.
+const STALE_DAYS: i64 = 14;
+
+/// "2026-11-12" 같은 날짜를 날수로 바꾼다 (두 날짜의 차이를 세는 데만 쓴다).
+fn days_of(date: &str) -> i64 {
+    let mut p = date.split('-').map(|x| x.parse::<i64>().unwrap_or(0));
+    let (y, m, d) = (p.next().unwrap_or(0), p.next().unwrap_or(1), p.next().unwrap_or(1));
+    let (y, m) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
+    365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d
+}
 
 fn recent_count() -> usize {
     // 확인용: LYBOARD_RECENT=2 처럼 줄이면 오래된 대화를 찾아오는 동작을 짧은 대화로도 시험할 수 있다.
@@ -125,6 +135,21 @@ struct App {
     /// 주제마다 마지막으로 손댄 차례 (보드가 커지면 최근에 다룬 주제만 자세히 모델에게 보낸다)
     touched: std::collections::HashMap<String, u64>,
     touch_seq: u64,
+    /// 주제마다 마지막으로 손댄 날짜 (오래 손대지 않은 주제를 보관하자고 짚는 데 쓴다)
+    touched_on: std::collections::HashMap<String, String>,
+    /// 조작 기록에 마지막으로 적은 날짜, 그리고 기록을 되살리는 동안의 "그때 날짜"
+    log_date: String,
+    replay_date: Option<String>,
+    /// 이번 턴에 쓸 옛 대화 후보
+    recall_cands: Vec<(f32, usize, String)>,
+    /// 확인용 입력 대본: 프레임마다 넣을 마우스 사건 (LYBOARD_INPUT). 실제 마우스를 건드리지 않고 끌기와 휠을 시험한다.
+    fake_input: std::collections::VecDeque<Vec<egui::Event>>,
+    fake_marks: std::collections::VecDeque<(usize, String)>,
+    fake_frame: usize,
+    /// 방금까지 사용자 앞에 있던 일의 주제 (다음 일을 고를 때 같은 주제의 것부터 가져온다)
+    task_topic: Option<String>,
+    /// 왼쪽 구역에 보관함 목록을 펼쳐 놓았는가
+    pub show_shelf: bool,
     /// 끝난 작업의 보고서 (작업 ID, 제목, 성공했는가, 보고서). 다음 턴에 메인 모델에게 전한다.
     job_news: Vec<(String, String, bool, String)>,
     /// 지금 도는 턴이 작업 결과를 정리하는 턴이면 그 이름
@@ -222,6 +247,15 @@ impl App {
             past: memory::Past::default(),
             touched: Default::default(),
             touch_seq: 0,
+            touched_on: Default::default(),
+            log_date: String::new(),
+            replay_date: None,
+            recall_cands: Vec::new(),
+            task_topic: None,
+            fake_input: Default::default(),
+            fake_marks: Default::default(),
+            fake_frame: 0,
+            show_shelf: std::env::var("LYBOARD_SHELF").is_ok(), // 확인용: 보관함 목록을 펼친 채로 시작
             job_news: Vec::new(),
             job_turn: None,
             tidy_rest: 0,
@@ -278,6 +312,41 @@ impl App {
                 sys::log("jev.log", &format!("구성 시험 결과: {hints:?}"));
             });
         }
+        // 확인용: LYBOARD_INPUT="drag 700 400 -900 0;wheel 700 400 -600;drag …" 처럼 주면 그 마우스 동작을 프로그램 안에서 흉내 낸다.
+        // 동작 하나가 끝나고 화면이 가라앉을 때마다 보는 범위를 data\view.log 에 남긴다.
+        if let Ok(script) = std::env::var("LYBOARD_INPUT") {
+            let m = egui::Modifiers::NONE;
+            let idle = |q: &mut std::collections::VecDeque<Vec<egui::Event>>, n: usize| (0..n).for_each(|_| q.push_back(Vec::new()));
+            idle(&mut app.fake_input, 120);
+            app.fake_marks.push_back((app.fake_input.len(), "시작".into()));
+            for step in script.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+                let w: Vec<&str> = step.split_whitespace().collect();
+                let n: Vec<f32> = w.iter().skip(1).filter_map(|x| x.parse().ok()).collect();
+                let q = &mut app.fake_input;
+                match (w.first().copied(), n.as_slice()) {
+                    (Some("drag"), [x, y, dx, dy]) => {
+                        let p = egui::pos2(*x, *y);
+                        q.push_back(vec![egui::Event::PointerMoved(p)]);
+                        q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+                        for i in 1..=20 {
+                            q.push_back(vec![egui::Event::PointerMoved(p + egui::vec2(*dx, *dy) * (i as f32 / 20.0))]);
+                        }
+                        idle(q, 12);
+                        app.fake_marks.push_back((q.len(), format!("{step} (누르고 있는 중)")));
+                        q.push_back(vec![egui::Event::PointerButton { pos: p + egui::vec2(*dx, *dy), button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+                    }
+                    (Some("wheel"), [x, y, amount]) => {
+                        q.push_back(vec![egui::Event::PointerMoved(egui::pos2(*x, *y))]);
+                        for _ in 0..10 {
+                            q.push_back(vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, *amount / 10.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: m }]);
+                        }
+                    }
+                    _ => {}
+                }
+                idle(q, 150);
+                app.fake_marks.push_back((q.len(), format!("{step} (손 뗀 뒤)")));
+            }
+        }
         // 확인용: 시작하자마자 이 주제 쪽으로 날아간다.
         if let Ok(g) = std::env::var("LYBOARD_GOTO") {
             app.view.want_topic(g);
@@ -292,6 +361,12 @@ impl App {
         if let Ok(text) = std::fs::read_to_string(log_path()) {
             for l in text.lines() {
                 if let Some((who, line)) = l.split_once('\t') {
+                    if who == "T" {
+                        // 날짜 표시 줄: 이 뒤의 조작은 이 날짜에 있었던 것이다.
+                        self.replay_date = Some(line.trim().to_string());
+                        self.log_date = line.trim().to_string();
+                        continue;
+                    }
                     let by = if who == "U" { Author::User } else { Author::Ai };
                     if let Ok(Some(op)) = lang::parse(line) {
                         if self.board.apply(op, by).is_ok() {
@@ -303,6 +378,7 @@ impl App {
             self.board.notes.clear();
         }
         self.log = std::fs::OpenOptions::new().create(true).append(true).open(log_path()).ok();
+        self.replay_date = None;
         // 지난번까지의 대화를 되살린다.
         let (past, tail) = memory::Past::load(RECENT);
         self.past = past;
@@ -332,13 +408,21 @@ impl App {
         match result {
             Ok(()) => {
                 self.touch(line);
+                let today = sys::now_local().0;
                 if let Some(f) = &mut self.log {
+                    if self.log_date != today {
+                        let _ = writeln!(f, "T\t{today}");
+                        self.log_date = today;
+                    }
                     let _ = writeln!(f, "{}\t{}", if by == Author::User { "U" } else { "A" }, line.trim());
                 }
                 // AI 가 어떤 카드를 건드렸으면, 그 카드의 주제가 화면에 보이게 한다.
                 if by == Author::Ai {
                     let mut words = line.split_whitespace();
                     let (cmd, id) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+                    if cmd == "restore" {
+                        self.view.want_topic(id.to_string());
+                    }
                     if matches!(cmd, "card" | "set" | "add" | "upd") {
                         if let Some(c) = self.board.card(id).filter(|c| c.kind != core::Kind::Decision) {
                             self.view.want_topic(c.topic.clone());
@@ -373,6 +457,42 @@ impl App {
         }
     }
 
+    /// 사용자가 처리할 일(결정 카드)을 하나 골라 앞에 가져다 놓는다. 사용자가 일을 찾아다니는 것이 아니라 일이 사용자를 찾아온다.
+    /// 앞에 있던 일이 처리되어 사라졌으면 다음 일을 가져오고, 보드는 그 일이 속한 구역을 바로 옆에 붙여 보여 준다.
+    fn pick_task(&mut self) {
+        let asks: Vec<(String, String)> = self.board.cards.iter().filter(|c| c.kind == core::Kind::Decision).map(|c| (c.id.clone(), c.topic.clone())).collect();
+        if let Some(cur) = &self.view.task {
+            if asks.iter().any(|a| &a.0 == cur) {
+                return;
+            }
+            self.view.task = None;
+        }
+        // 방금 한 답을 AI 가 반영하는 동안에는 화면이 그 일의 구역에 머문다. 반영이 끝나면 다음 일을 가져온다.
+        if self.busy || self.react_at.is_some() {
+            return;
+        }
+        // 방금 처리한 일과 같은 주제의 일이 남아 있으면 그것부터, 없으면 가장 오래 기다린 것부터.
+        let next = asks.iter().find(|a| Some(&a.1) == self.task_topic.as_ref()).or_else(|| asks.first());
+        if let Some((id, topic)) = next {
+            self.view.task = Some(id.clone());
+            self.task_topic = Some(topic.clone());
+            self.view.dock_topic(topic.clone());
+        }
+    }
+
+    /// 지금 일은 미뤄 두고 다음 일을 앞에 가져온다.
+    pub fn next_task(&mut self) {
+        let asks: Vec<(String, String)> = self.board.cards.iter().filter(|c| c.kind == core::Kind::Decision).map(|c| (c.id.clone(), c.topic.clone())).collect();
+        if asks.len() < 2 {
+            return;
+        }
+        let at = asks.iter().position(|a| Some(&a.0) == self.view.task.as_ref()).unwrap_or(0);
+        let (id, topic) = asks[(at + 1) % asks.len()].clone();
+        self.view.task = Some(id);
+        self.task_topic = Some(topic.clone());
+        self.view.dock_topic(topic);
+    }
+
     /// 이 줄이 다룬 주제를 "방금 손댄 주제"로 적어 둔다.
     fn touch(&mut self, line: &str) {
         let Some(id) = line.split_whitespace().nth(1) else { return };
@@ -382,6 +502,9 @@ impl App {
             None => return,
         };
         self.touch_seq += 1;
+        // 날짜가 적히기 전의 옛 기록은 언제 것인지 알 수 없으므로 오늘로 친다 (오늘부터 나이를 센다).
+        let date = self.replay_date.clone().unwrap_or_else(|| sys::now_local().0);
+        self.touched_on.insert(topic.clone(), date);
         self.touched.insert(topic, self.touch_seq);
     }
 
@@ -427,9 +550,27 @@ impl App {
         }
         // 최근 대화보다 오래된 턴 가운데 이번 말과 관련 있는 것을 찾아 함께 보낸다.
         let older = self.past.len().saturating_sub(recent_count());
-        let recalled = self.past.recall(input, older, 5);
-        if !recalled.is_empty() {
-            t += &format!("<recall>\n{recalled}</recall>\n");
+        self.recall_cands = if input.is_empty() { Vec::new() } else { self.past.candidates(input, older, 12, 0.15) };
+        // 보관함: 화면에서 내려 둔 주제들. 이번 말과 이름이나 카드 제목이 겹치는 것을 앞에 적는다.
+        if !self.board.shelf.is_empty() {
+            let said = memory::grams(input);
+            let mut rows: Vec<(usize, String)> = self
+                .board
+                .shelf
+                .iter()
+                .enumerate()
+                .map(|(n, s)| {
+                    let titles: Vec<&str> = s.cards.iter().take(8).map(|c| c.title.as_str()).collect();
+                    let words = memory::grams(&format!("{} {}", s.topic.name, titles.join(" ")));
+                    let shared = words.iter().filter(|g| said.binary_search(g).is_ok()).count();
+                    // 겹치는 것 먼저, 그다음 최근에 보관한 것 먼저
+                    (shared * 100_000 + n, format!("{} {} (카드 {}장: {}){}", s.topic.id, s.topic.name, s.cards.len(), titles.join(", "), if shared >= 2 { "  ← 이번 말과 관련 있어 보임" } else { "" }))
+                })
+                .collect();
+            rows.sort_by(|a, b| b.0.cmp(&a.0));
+            let more = rows.len().saturating_sub(40);
+            let lines: Vec<String> = rows.into_iter().take(40).map(|r| r.1).collect();
+            t += &format!("<archived>\n{}\n{}</archived>\n", lines.join("\n"), if more > 0 { format!("(이 밖에 {more}개)\n") } else { String::new() });
         }
         if !self.recent.is_empty() {
             t += "<recent>\n";
@@ -544,6 +685,7 @@ impl App {
             notes: vault::notes().into_iter().filter(|(p, _)| p != memory::CORE).collect(),
             recent: self.recent.iter().rev().take(3).rev().map(|(u, a)| format!("사용자: {u}\n응답: {a}\n")).collect(),
             voice: self.voice,
+            recall: std::mem::take(&mut self.recall_cands),
         };
         let ctx = ctx.clone();
         llm::run_turn(self.cfg.clone(), text, pre, self.turn_no, self.tx.clone(), move || ctx.request_repaint());
@@ -624,6 +766,8 @@ impl App {
         self.idle_since = std::time::Instant::now();
         self.activity.clear();
         self.pre = None;
+        // 구성 정리 턴인데 고칠 것이 없어 아무것도 내지 않았으면, 대화에도 기록에도 남기지 않는다.
+        let silent = self.tidying && self.turn_raw.trim().is_empty() && self.error.is_none();
         // 이번 턴에 손댄 카드와 주제 (보드가 아무리 커져도 검토와 기록은 이것만 본다)
         let mut touched_cards: Vec<String> = Vec::new();
         for l in self.turn_raw.lines() {
@@ -642,7 +786,23 @@ impl App {
         }
         let topic_names: Vec<String> = hot_topics.iter().filter_map(|id| self.board.topics.iter().find(|t| &t.id == id).map(|t| t.name.clone())).collect();
         // 메인 모델이 화면을 고친 뒤: 판단 모델이 화면만 보고 카드마다 "무엇인지 분명한가", "얼마나 중요한가"를 본다.
-        if !self.cfg.demo() && jev::key().is_some() && !self.board.cards.is_empty() {
+        if !self.cfg.demo() && !self.board.cards.is_empty() {
+            // 오래 손대지 않은 주제: 보관하자고 짚는다 (답을 기다리는 결정이 있는 주제는 빼고).
+            let limit = std::env::var("LYBOARD_STALE_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(STALE_DAYS);
+            let today = days_of(&sys::now_local().0);
+            let mut stale: Vec<(i64, String)> = self
+                .board
+                .topics
+                .iter()
+                .filter(|t| !hot_topics.contains(&t.id))
+                .filter(|t| !self.board.cards.iter().any(|c| c.topic == t.id && (c.kind == core::Kind::Decision || c.id.starts_with("job"))))
+                .filter_map(|t| {
+                    let age = today - days_of(self.touched_on.get(&t.id)?);
+                    (age >= limit).then(|| (age, format!("주제 {}({})는 {age}일 동안 손대지 않음. 끝났거나 한동안 볼 일이 없으면 archive 로 보관할 것", t.id, t.name)))
+                })
+                .collect();
+            stale.sort_by(|a, b| b.0.cmp(&a.0));
+            let stale: Vec<String> = stale.into_iter().take(6).map(|s| s.1).collect();
             let board = lang::serialize_with(&self.board, &|t| if hot_topics.iter().any(|h| h == t) { 2 } else { 0 });
             let cards: Vec<(String, String, String)> = touched_cards
                 .iter()
@@ -673,7 +833,8 @@ impl App {
                 if let Some(post) = decide::after(&board, &cards) {
                     let _ = tx.send(llm::Msg::Review(post));
                 }
-                let hints = decide::structure(&topics, &groups, &hot);
+                let mut hints = decide::structure(&topics, &groups, &hot);
+                hints.extend(stale);
                 if !hints.is_empty() {
                     let _ = tx.send(llm::Msg::Tidy(hints));
                 }
@@ -681,7 +842,7 @@ impl App {
             });
         }
         // 이 턴을 기억에 남긴다: 턴 기록에 덧붙이고, 뒤에서 작은 모델이 오래 남길 사실을 골라 핵심 기억에 적는다.
-        if !self.cfg.demo() {
+        if !self.cfg.demo() && !silent {
             let (date, time) = sys::now_local();
             let turn = memory::Turn {
                 at: format!("{date} {time}"),
@@ -691,10 +852,17 @@ impl App {
                 ops: self.turn_raw.trim().chars().take(2000).collect(),
                 topics: topic_names.join(", "),
             };
+            let turn_index = self.past.len();
             self.past.push(&turn);
             if let (Some(key), false) = (self.cfg.key.clone(), self.tidying) {
                 let events = self.turn_events.clone();
-                std::thread::spawn(move || memory::keep(&key, &turn, &events));
+                let (tx, wake) = (self.tx.clone(), self.wake.clone());
+                std::thread::spawn(move || {
+                    if let Some(keys) = memory::keep(&key, &turn, &events) {
+                        let _ = tx.send(llm::Msg::Keys(turn_index, keys));
+                        wake.request_repaint();
+                    }
+                });
             }
         }
         // 방금 턴이 구성 정리였으면 한동안 다시 정리하지 않는다 (정리가 정리를 부르지 않게).
@@ -705,7 +873,7 @@ impl App {
             self.tidy_rest = self.tidy_rest.saturating_sub(1);
         }
         // 이 턴을 오늘의 기록 노트에 남긴다 (시연 모드는 남기지 않는다).
-        if !self.cfg.demo() {
+        if !self.cfg.demo() && !silent {
             vault::log_turn(&vault::TurnRecord {
                 input: self.cur_input.clone(),
                 say: self.board.say.clone(),
@@ -715,7 +883,9 @@ impl App {
                 error: self.error.clone(),
             });
         }
-        self.recent.push((std::mem::take(&mut self.cur_input), self.board.say.clone()));
+        if !silent {
+            self.recent.push((std::mem::take(&mut self.cur_input), self.board.say.clone()));
+        }
     }
 
     /// 맡긴 작업의 소식을 화면에 반영한다. 작업마다 진행 카드가 하나씩 있다 (카드 ID = 작업 ID).
@@ -783,6 +953,7 @@ impl App {
                     self.pre = Some(p);
                 }
                 llm::Msg::Job(ev) => self.job_event(ev),
+                llm::Msg::Keys(i, keys) => self.past.add_keys(i, &keys),
                 llm::Msg::Board { topic, reply } => {
                     let found = self.board.topics.iter().any(|t| t.id == topic);
                     let _ = reply.send(if found {
@@ -1026,6 +1197,35 @@ fn card_chars(c: &core::Card) -> usize {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.fake_input.is_empty() && self.fake_marks.is_empty() {
+            return;
+        }
+        if let Some(events) = self.fake_input.pop_front() {
+            raw.events.extend(events);
+        }
+        self.fake_frame += 1;
+        while self.fake_marks.front().map(|m| m.0 <= self.fake_frame).unwrap_or(false) {
+            let (_, name) = self.fake_marks.pop_front().unwrap();
+            if let Some((seen, limit)) = self.view.seen() {
+                let out = (limit.min.x - seen.min.x).max(seen.max.x - limit.max.x).max(limit.min.y - seen.min.y).max(seen.max.y - limit.max.y);
+                let fits = seen.width() >= limit.width() - 1.0 || seen.height() >= limit.height() - 1.0;
+                sys::log(
+                    "view.log",
+                    &format!(
+                        "{name}: 확대 {:.0}%  보는 범위 x {:.0}~{:.0} y {:.0}~{:.0}  한계 x {:.0}~{:.0} y {:.0}~{:.0}  한계 밖으로 나간 거리 {:.0}{}",
+                        self.view.zoom * 100.0,
+                        seen.min.x, seen.max.x, seen.min.y, seen.max.y,
+                        limit.min.x, limit.max.x, limit.min.y, limit.max.y,
+                        out.max(0.0),
+                        if fits { " (전체 보기라 보는 범위가 한계보다 넓은 축이 있음)" } else { "" }
+                    ),
+                );
+            }
+        }
+        ctx.request_repaint();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // 확인용: LYBOARD_SHOT=파일.bmp 가 있으면 잠시 뒤 화면을 그 파일로 저장한다 (PC 가 잠겨 있어도 된다).
         if let Some(path) = self.shot.clone() {
@@ -1085,6 +1285,7 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
+        self.pick_task();
         self.chat_panel(ui, &ctx, talking);
 
         egui::CentralPanel::default()

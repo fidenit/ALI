@@ -66,6 +66,12 @@ impl Past {
             at += line.len();
         }
         past.end = at as u64;
+        // 턴마다 나중에 덧붙여진 "찾을 때 쓸 낱말"을 합친다.
+        for line in std::fs::read_to_string(keys_path()).unwrap_or_default().lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                past.merge(v["i"].as_u64().unwrap_or(u64::MAX) as usize, v["keys"].as_str().unwrap_or(""));
+            }
+        }
         (past, last.into())
     }
 
@@ -84,17 +90,38 @@ impl Past {
         }
     }
 
-    /// 앞에서부터 `upto` 개의 턴 가운데 `query` 와 관련 있는 것을 골라 모델에게 보일 글로 만든다. 없으면 빈 글.
-    pub fn recall(&self, query: &str, upto: usize, max: usize) -> String {
+    fn merge(&mut self, i: usize, keys: &str) {
+        if let Some(e) = self.entries.get_mut(i) {
+            e.1.extend(grams(keys));
+            e.1.sort_unstable();
+            e.1.dedup();
+        }
+    }
+
+    /// 턴 `i` 에 "찾을 때 쓸 낱말"(비슷한 말, 다른 표기)을 덧붙인다. 다른 낱말로 물어도 이 턴이 찾아지게 된다.
+    pub fn add_keys(&mut self, i: usize, keys: &str) {
+        if i >= self.entries.len() || keys.trim().is_empty() {
+            return;
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(keys_path()) {
+            let _ = writeln!(f, "{}", serde_json::json!({ "i": i, "keys": keys }));
+        }
+        self.merge(i, keys);
+    }
+
+    /// 앞에서부터 `upto` 개의 턴 가운데 `query` 와 글자가 겹치는 후보를 고른다. (점수, 턴 번호, 모델에게 보일 글).
+    /// 여기서는 넉넉히 고르고, 정말 관련 있는지는 판단 모델이 다시 거른다.
+    pub fn candidates(&self, query: &str, upto: usize, max: usize, min: f32) -> Vec<(f32, usize, String)> {
         let upto = upto.min(self.entries.len());
         let sets: Vec<&[u32]> = self.entries[..upto].iter().map(|e| e.1.as_slice()).collect();
-        let picked = rank(&sets, query, max);
+        let picked = rank(&sets, query, max, min);
         if picked.is_empty() {
-            return String::new();
+            return Vec::new();
         }
-        let Ok(mut f) = std::fs::File::open(path()) else { return String::new() };
-        let mut out = String::new();
-        for i in picked {
+        let Ok(mut f) = std::fs::File::open(path()) else { return Vec::new() };
+        let mut found = Vec::new();
+        for (score, i) in picked {
+            let mut out = String::new();
             use std::io::{BufRead, Seek};
             if f.seek(std::io::SeekFrom::Start(self.entries[i].0)).is_err() {
                 continue;
@@ -113,14 +140,19 @@ impl Past {
                 let ops: String = t.ops.chars().take(600).collect();
                 out += &format!("그때 화면에 낸 것:\n{}\n", ops.trim());
             }
-            out += "\n";
+            found.push((score, i, out));
         }
-        out
+        found
     }
+}
+
+fn keys_path() -> std::path::PathBuf {
+    sys::data_dir().join("turn-keys.jsonl")
 }
 
 pub fn forget_turns() {
     let _ = std::fs::remove_file(path());
+    let _ = std::fs::remove_file(keys_path());
 }
 
 // ---------------------------------------------------------------------------
@@ -144,8 +176,8 @@ fn doc(t: &Turn) -> String {
     format!("{} {} {} {}", t.user, t.say, t.topics, t.ops)
 }
 
-/// 관련 있는 턴의 번호를 시간 순서로 돌려준다.
-fn rank(docs: &[&[u32]], query: &str, max: usize) -> Vec<usize> {
+/// 관련 있는 턴을 (점수, 번호) 로, 점수가 높은 것부터 돌려준다.
+fn rank(docs: &[&[u32]], query: &str, max: usize, min: f32) -> Vec<(f32, usize)> {
     let q = grams(query);
     if q.is_empty() || docs.is_empty() {
         return Vec::new();
@@ -166,17 +198,16 @@ fn rank(docs: &[&[u32]], query: &str, max: usize) -> Vec<usize> {
                 sum += weight[k];
             }
         }
-        let enough = shared >= 2 || (q.len() <= 2 && shared >= 1);
-        if enough && sum / total >= 0.3 {
+        // 넉넉히 뽑는 단계(min 이 낮을 때)에서는 한 군데만 겹쳐도 후보로 올린다. 관련 없는 것은 판단 모델이 걸러 낸다.
+        let enough = shared >= 2 || (shared >= 1 && (q.len() <= 2 || min < 0.3));
+        if enough && sum / total >= min {
             // 같은 이야기가 여러 번 나왔으면 나중 것이 지금의 사실에 가깝다. 최근 것을 조금 더 친다.
             scored.push((sum / total * (0.85 + 0.15 * (i as f32 + 1.0) / n), i));
         }
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(b.1.cmp(&a.1)));
     scored.truncate(max);
-    let mut picked: Vec<usize> = scored.into_iter().map(|s| s.1).collect();
-    picked.sort_unstable();
-    picked
+    scored
 }
 
 // ---------------------------------------------------------------------------
@@ -222,7 +253,9 @@ const KEEPER: &str = "너는 개인 비서 프로그램의 장기 기억을 관�
 출력 형식 (한 줄에 하나, 다른 글은 쓰지 않는다)
 + <새 사실. 이 한 문장만 읽어도 뜻이 통하게 쓴다. \"내일\" 같은 말은 날짜로 바꾼다>
 - <지울 기존 사실을 그대로 옮겨 적는다. 틀렸거나, 바뀌었거나, 끝난 일일 때>
-바뀐 사실은 옛 줄을 - 로 지우고 새 줄을 + 로 적는다. 남길 것이 없으면 `없음` 한 마디만 출력한다. 대부분의 턴은 `없음`이다.";
+바뀐 사실은 옛 줄을 - 로 지우고 새 줄을 + 로 적는다. 남길 사실이 없으면 그 자리에 `없음` 한 마디를 적는다. 대부분의 턴은 `없음`이다.
+
+그리고 맨 마지막 줄에는 언제나 `? ` 로 시작하는 줄을 하나 적는다. 나중에 사용자가 다른 낱말로 물어도 이 대화가 찾아지도록, 이 턴의 내용을 가리키는 낱말을 10~20개 띄어쓰기로 늘어놓는다: 핵심 낱말, 그 비슷한 말과 더 넓은 말, 한국어·영어의 다른 표기. 사용자는 한국어로 물으므로 비슷한 말은 한글로 먼저 적는다(펜션이면 호텔, 숙박, 숙소도). 예: `? 숙소 호텔 숙박 펜션 잠잘곳 제주 제주도 여행 휴가 예약 hotel`";
 
 const TRIMMER: &str = "너는 개인 비서 프로그램의 장기 기억을 간추린다. 핵심 기억 목록을 받아서 같은 내용을 더 짧게 다시 쓴다.
 - 겹치는 줄은 하나로 합친다. 끝난 일, 지난 기한, 더 새 줄로 바뀐 옛 사실은 뺀다.
@@ -237,7 +270,8 @@ fn model() -> String {
 }
 
 /// 한 턴이 끝난 뒤 (뒤에서) 핵심 기억을 고친다.
-pub fn keep(key: &str, turn: &Turn, events: &str) {
+/// 돌려주는 값은 이 턴을 찾을 때 쓸 낱말들.
+pub fn keep(key: &str, turn: &Turn, events: &str) -> Option<String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let before = core();
     let ops: String = turn.ops.chars().take(1500).collect();
@@ -251,8 +285,12 @@ pub fn keep(key: &str, turn: &Turn, events: &str) {
     );
     let answer = match crate::agent::ask(key, &model(), KEEPER, &user, 800) {
         Ok(a) => a,
-        Err(e) => return sys::log("memory.log", &format!("기억 정리 실패: {e}")),
+        Err(e) => {
+            sys::log("memory.log", &format!("기억 정리 실패: {e}"));
+            return None;
+        }
     };
+    let keys = answer.lines().rev().find_map(|l| l.trim().strip_prefix("? ")).map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
     let mut lines: Vec<String> = before.lines().map(str::to_string).collect();
     let date = turn.at.split(' ').next().unwrap_or("").to_string();
     let mut changed = Vec::new();
@@ -271,7 +309,7 @@ pub fn keep(key: &str, turn: &Turn, events: &str) {
         }
     }
     if changed.is_empty() {
-        return;
+        return keys;
     }
     sys::log("memory.log", &format!("{}: {}", turn.at, changed.join(" | ")));
     save_core(&lines);
@@ -298,6 +336,7 @@ pub fn keep(key: &str, turn: &Turn, events: &str) {
             Err(e) => sys::log("memory.log", &format!("간추리기 실패: {e}")),
         }
     }
+    keys
 }
 
 #[cfg(test)]
@@ -317,8 +356,18 @@ mod tests {
         ];
         let sets: Vec<Vec<u32>> = turns.iter().map(|t| grams(&doc(t))).collect();
         let docs: Vec<&[u32]> = sets.iter().map(Vec::as_slice).collect();
-        assert_eq!(rank(&docs, "제주 숙소 어디로 했었지?", 5), vec![0]);
-        assert!(rank(&docs, "오늘 날씨 어때", 5).is_empty());
+        let found: Vec<usize> = rank(&docs, "제주 숙소 어디로 했었지?", 5, 0.3).into_iter().map(|r| r.1).collect();
+        assert_eq!(found, vec![0]);
+        assert!(rank(&docs, "오늘 날씨 어때", 5, 0.3).is_empty());
+        // 다른 낱말("호텔")로 물으면 글자만으로는 못 찾지만, 찾을 때 쓸 낱말을 붙여 두면 찾아진다.
+        assert!(rank(&docs, "호텔 예약한 데가 어디였지", 5, 0.15).is_empty());
+        let mut with_keys = sets[0].clone();
+        with_keys.extend(grams("숙소 호텔 숙박 예약 제주도"));
+        with_keys.sort_unstable();
+        with_keys.dedup();
+        let docs2: Vec<&[u32]> = vec![&with_keys, &sets[1], &sets[2]];
+        let found: Vec<usize> = rank(&docs2, "호텔 예약한 데가 어디였지", 5, 0.15).into_iter().map(|r| r.1).collect();
+        assert_eq!(found, vec![0]);
     }
 
     #[test]
@@ -333,7 +382,7 @@ mod tests {
             .collect();
         let docs: Vec<&[u32]> = sets.iter().map(Vec::as_slice).collect();
         let started = std::time::Instant::now();
-        let picked = rank(&docs, "제주 숙소 예산 어떻게 됐지", 5);
+        let picked = rank(&docs, "제주 숙소 예산 어떻게 됐지", 5, 0.3);
         let ms = started.elapsed().as_millis();
         assert!(picked.len() <= 5);
         assert!(ms < 400, "36,000턴에서 찾는 데 {ms}ms");

@@ -1,4 +1,4 @@
-//! 왼쪽에 고정된 대화 구역: 주고받은 말, 진행 표시, 입력창, 버튼.
+﻿//! 왼쪽에 고정된 대화 구역: 주고받은 말, 진행 표시, 입력창, 버튼.
 
 use eframe::egui;
 
@@ -8,7 +8,7 @@ const PANEL: egui::Color32 = egui::Color32::from_rgb(21, 22, 25);
 const PANEL_EDGE: egui::Color32 = egui::Color32::from_rgb(33, 34, 38);
 const FIELD: egui::Color32 = egui::Color32::from_rgb(28, 29, 32);
 const FIELD_EDGE: egui::Color32 = egui::Color32::from_rgb(50, 51, 56);
-pub const WIDTH: f32 = 380.0;
+pub const WIDTH: f32 = 444.0;
 
 /// 이름이 붙은 스위치. 손잡이가 오른쪽에 밝게 있으면 켜진 것, 왼쪽에 어둡게 있으면 꺼진 것. 눌렸으면 true.
 fn switch(ui: &mut egui::Ui, ctx: &egui::Context, id: &str, label: &str, on: bool, hint: &str) -> bool {
@@ -27,6 +27,8 @@ fn switch(ui: &mut egui::Ui, ctx: &egui::Context, id: &str, label: &str, on: boo
     r.on_hover_text(hint).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
+use eframe::egui::Rect;
+
 impl App {
     pub fn chat_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, talking: bool) {
         egui::Panel::left("chat")
@@ -42,12 +44,26 @@ impl App {
                     .inner_margin(egui::Margin::same(18))
                     .show(ui, |ui| {
                         ui.set_min_size(ui.available_size());
+                        // 내가 할 일이 있으면 이 구역을 위아래로 반씩 나눈다: 위는 "내 차례"(지금 처리할 일 하나), 아래는 대화.
+                        let whole = ui.available_rect_before_wrap();
+                        let asks = self.board.cards.iter().filter(|c| c.kind == crate::core::Kind::Decision).count();
+                        let lower = if asks > 0 {
+                            let (top, bottom) = whole.split_top_bottom_at_fraction(0.5);
+                            ui.scope_builder(egui::UiBuilder::new().max_rect(top), |ui| self.task_slot(ui, asks));
+                            Rect::from_min_max(bottom.min + egui::vec2(0.0, 14.0), bottom.max)
+                        } else {
+                            self.view.task_rect = None;
+                            whole
+                        };
+                        ui.scope_builder(egui::UiBuilder::new().max_rect(lower), |ui| {
+                        ui.set_min_size(ui.available_size());
                         // 아래에서 위로 쌓는다: 맨 아래에 상태 줄, 그 위에 버튼, 입력창, 진행 표시. 남는 위쪽이 대화.
                         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
                             ui.label(egui::RichText::new(self.status_line()).size(10.5).color(ui::FAINT));
                             ui.add_space(8.0);
                             self.buttons(ui, ctx);
                             ui.add_space(8.0);
+                            self.shelf_row(ui);
                             if self.cfg.key.is_none() && std::env::var("LYBOARD_DEMO").is_err() {
                                 self.key_setup(ui);
                             } else {
@@ -62,12 +78,100 @@ impl App {
                             ui.add_space(6.0);
                             self.history(ui);
                         });
+                        });
                     });
             });
     }
 
+    /// "내 차례": 내가 답하거나 승인해야 할 일이 하나씩 여기로 온다. 처리하면 다음 일이 온다.
+    /// 여기서는 머리 줄만 그리고 카드 자리를 잡아 둔다. 카드는 보드가 그 자리에 그린다.
+    fn task_slot(&mut self, ui: &mut egui::Ui, asks: usize) {
+        let now = ui.input(|i| i.time);
+        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+        let pulse = ((now * 2.4).sin() * 0.5 + 0.5) as f32;
+        let dot = r.rect.left_center() + egui::vec2(8.0, 0.0);
+        p.circle_filled(dot, 4.0 + 3.0 * pulse, ui::ORANGE.gamma_multiply(0.25 * (1.0 - pulse)));
+        p.circle_filled(dot, 4.0, ui::ORANGE);
+        let tr = p.text(r.rect.left_center() + egui::vec2(22.0, 0.0), egui::Align2::LEFT_CENTER, "내 차례", ui::bold(15.0), ui::TEXT);
+        // 남은 일의 수. 지금 앞에 있는 것까지 센다.
+        p.text(egui::pos2(tr.right() + 10.0, tr.center().y), egui::Align2::LEFT_CENTER, format!("남은 {asks}건"), ui::bold(12.5), ui::ORANGE);
+        // 다른 일부터 보고 싶으면 넘긴다.
+        if asks > 1 {
+            let br = Rect::from_min_size(egui::pos2(r.rect.right() - 62.0, r.rect.top() + 2.0), egui::vec2(60.0, 26.0));
+            let b = ui.interact(br, ui.scope_id().with("task-next"), egui::Sense::click());
+            p.rect_stroke(br, 13.0, egui::Stroke::new(1.0, if b.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+            p.text(br.center(), egui::Align2::CENTER_CENTER, "다음 ›", ui::bold(12.0), if b.hovered() { ui::TEXT } else { ui::DIM });
+            if b.on_hover_text("이 일은 나중에 하고 다음 일부터 봅니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.next_task();
+            }
+        }
+        ui.add_space(8.0);
+        let rest = ui.available_rect_before_wrap();
+        // 아래 대화 구역과의 경계선
+        ui.painter().hline(rest.x_range(), rest.bottom() + 6.0, egui::Stroke::new(1.0, PANEL_EDGE));
+        self.view.task_rect = Some(rest);
+        if self.view.task.is_none() {
+            // 방금 한 답을 반영하는 중: 끝나면 다음 일이 이 자리로 온다.
+            ui.painter().text(rest.left_top() + egui::vec2(4.0, 10.0), egui::Align2::LEFT_TOP, "답을 반영하는 중입니다. 끝나면 다음 일이 옵니다.", ui::font(12.5), ui::FAINT);
+        }
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); // 점이 깜빡인다
+    }
+
+    /// 보관함으로 가는 한 줄. 보관된 주제가 있을 때만 보인다.
+    fn shelf_row(&mut self, ui: &mut egui::Ui) {
+        let n = self.board.shelf.len();
+        if n == 0 {
+            self.show_shelf = false;
+            return;
+        }
+        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+        let label = if self.show_shelf { "← 대화로 돌아가기".to_string() } else { format!("보관된 주제 {n}개  ›") };
+        p.text(r.rect.left_center() + egui::vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, label, ui::bold(12.5), if r.hovered() { ui::TEXT } else { ui::DIM });
+        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.show_shelf = !self.show_shelf;
+        }
+        ui.add_space(4.0);
+    }
+
+    /// 보관함 목록. 누르면 그 주제가 화면으로 돌아온다.
+    fn shelf_list(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width();
+        let mut back = None;
+        egui::ScrollArea::vertical().auto_shrink(false).max_height(ui.available_height()).show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(width);
+                ui.label(egui::RichText::new("보관된 주제 · 누르면 화면으로 다시 꺼냅니다").size(12.0).color(ui::FAINT));
+                ui.add_space(8.0);
+                for s in self.board.shelf.iter().rev() {
+                    let (r, p) = ui.allocate_painter(egui::vec2(width - 6.0, 46.0), egui::Sense::click());
+                    p.rect_filled(r.rect, 14.0, FIELD);
+                    p.rect_stroke(r.rect, 14.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM } else { FIELD_EDGE }), egui::StrokeKind::Inside);
+                    // 이름이 길어도 줄 밖으로 나가지 않게 이 줄 안에서만 그린다.
+                    let inner = p.with_clip_rect(r.rect.shrink2(egui::vec2(12.0, 0.0)));
+                    inner.text(r.rect.left_top() + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, &s.topic.name, ui::bold(13.5), ui::TEXT);
+                    let titles: Vec<&str> = s.cards.iter().take(4).map(|c| c.title.as_str()).collect();
+                    inner.text(r.rect.left_top() + egui::vec2(14.0, 27.0), egui::Align2::LEFT_TOP, format!("카드 {}장 · {}", s.cards.len(), titles.join(", ")), ui::font(11.0), ui::FAINT);
+                    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        back = Some(s.topic.id.clone());
+                    }
+                    ui.add_space(6.0);
+                }
+            });
+        });
+        if let Some(id) = back {
+            self.apply_line(&format!("restore {id}"), crate::core::Author::User);
+            self.view.want_topic(id);
+            if self.board.shelf.is_empty() {
+                self.show_shelf = false;
+            }
+        }
+    }
+
     /// 주고받은 말. 화면에 글을 쌓지 않는 것이 이 프로그램의 원칙이므로, AI 쪽은 한마디(say)만 남는다.
     fn history(&mut self, ui: &mut egui::Ui) {
+        if self.show_shelf && !self.board.shelf.is_empty() {
+            return self.shelf_list(ui);
+        }
         let width = ui.available_width();
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink(false).max_height(ui.available_height()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {

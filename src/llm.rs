@@ -23,6 +23,8 @@ pub enum Msg {
     Job(crate::jobs::Event),
     /// 보드에서 주제 하나의 내용을 전부 읽어 달라는 요청 (보드가 커서 줄여 보냈을 때)
     Board { topic: String, reply: Sender<String> },
+    /// 기억 정리가 끝나서, 턴 하나에 "찾을 때 쓸 낱말"이 붙었다 (턴 번호, 낱말들)
+    Keys(usize, String),
     Done(Stats),
     Error(String),
 }
@@ -75,6 +77,8 @@ pub struct PreInput {
     pub recent: String,
     /// 음성이 켜져 있는가
     pub voice: bool,
+    /// 이번 말과 글자가 겹치는 옛 대화 후보 (점수, 턴 번호, 내용)
+    pub recall: Vec<(f32, usize, String)>,
 }
 
 /// 한 턴을 별도 스레드에서 실행한다. `wake` 는 화면을 다시 그리게 깨우는 함수.
@@ -110,6 +114,13 @@ pub fn run_turn(cfg: Config, turn_text: String, pre: PreInput, turn_no: usize, t
                     turn_text += &format!("\n<already_said>{ack}</already_said>");
                 }
                 send(Msg::Pre(p));
+            }
+        }
+        // 옛 대화: 후보 가운데 정말 필요한 것만 골라 함께 보낸다.
+        if !cfg.demo() && !pre.recall.is_empty() {
+            let picked = crate::decide::relevant(&pre.input, &pre.recent, &pre.recall);
+            if !picked.is_empty() {
+                turn_text += &format!("\n<recall>\n{}</recall>", picked.join(""));
             }
         }
         let result = match &cfg.key {

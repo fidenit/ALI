@@ -295,3 +295,45 @@ pub fn structure(topics: &[(String, String, String, String)], groups: &[(String,
     crate::sys::log("jev.log", &format!("구성 {}ms  주제 {}  분류 {}  짚은 것 {:?}", started.elapsed().as_millis(), topics.len(), groups.len(), hints));
     hints
 }
+
+/// 글자가 겹쳐서 후보로 뽑힌 옛 대화들 가운데, 지금 말에 정말 필요한 것을 고른다.
+/// `cands` 는 (글자 겹침 점수, 턴 번호, 내용). 고른 것의 내용을 시간 순서로 돌려준다.
+/// 글자가 겹친다고 관련 있는 것은 아니고(같은 낱말, 다른 이야기), 덜 겹쳐도 꼭 필요한 것이 있어서 판단 모델에게 묻는다.
+pub fn relevant(input: &str, recent: &str, cands: &[(f32, usize, String)]) -> Vec<String> {
+    const MAX: usize = 5;
+    let by_letters = || {
+        let mut v: Vec<&(f32, usize, String)> = cands.iter().filter(|c| c.0 >= 0.3).take(MAX).collect();
+        v.sort_by_key(|c| c.1);
+        v.into_iter().map(|c| c.2.clone()).collect::<Vec<_>>()
+    };
+    if cands.is_empty() || jev::key().is_none() {
+        return by_letters();
+    }
+    let mut state = format!("사용자가 방금 한 말:\n{input}\n");
+    if !recent.is_empty() {
+        state += &format!("\n직전 대화:\n{recent}\n");
+    }
+    let mut q = Map::new();
+    for (n, (_, _, text)) in cands.iter().enumerate() {
+        let short: String = text.chars().take(320).collect();
+        q.insert(format!("r{n}"), jev::noul(&format!("아래 옛 대화에는 사용자가 방금 한 말에 답하거나 그 일을 하는 데 필요한 내용이 들어 있다.\n\n{short}")));
+    }
+    let started = std::time::Instant::now();
+    let a = match jev::decide(&state, Value::Object(q)) {
+        Ok(a) => a,
+        Err(e) => {
+            crate::sys::log("jev.log", &format!("옛 대화 고르기 실패: {e}"));
+            return by_letters();
+        }
+    };
+    let mut scored: Vec<(f64, &(f32, usize, String))> =
+        cands.iter().enumerate().map(|(n, c)| (a.get(&format!("r{n}")).and_then(|x| x.value).unwrap_or(0.0), c)).collect();
+    let seen: Vec<String> = scored.iter().map(|(p, c)| format!("{p:.2}/{:.2} #{}", c.0, c.1)).collect();
+    crate::sys::log("jev.log", &format!("옛 대화 {}ms  (판단/글자 #턴) {}", started.elapsed().as_millis(), seen.join(" ")));
+    // 판단 모델이 필요하다고 본 것, 또는 글자가 아주 많이 겹치는 것.
+    scored.retain(|(p, c)| *p >= 0.35 || c.0 >= 0.55);
+    scored.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(MAX);
+    scored.sort_by_key(|(_, c)| c.1);
+    scored.into_iter().map(|(_, c)| c.2.clone()).collect()
+}
