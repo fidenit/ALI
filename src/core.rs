@@ -20,71 +20,126 @@ pub enum Kind {
     Route,
     /// AI 가 선·화살표·상자·원·글로 직접 그리는 그림 카드
     Draw,
+    /// 그림 파일이나 그림 주소를 그대로 보여 주는 카드
+    Image,
     /// 웹 페이지나 HTML 파일을 그대로 보여 주는 작은 브라우저
     Web,
 }
 
-pub const KINDS: [(Kind, &str, (u8, u8)); 13] = [
-    (Kind::Web, "web", (6, 5)),
-    (Kind::Note, "note", (3, 2)),
-    (Kind::Status, "status", (2, 1)),
-    (Kind::Progress, "progress", (3, 3)),
-    (Kind::Decision, "decision", (3, 3)),
-    (Kind::Input, "input", (3, 3)),
-    (Kind::Checklist, "checklist", (3, 3)),
-    (Kind::Table, "table", (4, 3)),
-    (Kind::Metric, "metric", (2, 2)),
-    (Kind::Chart, "chart", (4, 3)),
-    (Kind::Timeline, "timeline", (3, 3)),
-    (Kind::Route, "route", (6, 5)),
-    (Kind::Draw, "draw", (5, 4)),
+/// 부품 하나의 등록 내용. 부품에 관한 것은 여기 한 곳에 모은다: 이름, 기본 크기, 받는 필드와 글자 한도,
+/// 항목의 형식, 그리고 모델에게 알려 줄 설명. 모델에게 주는 부품 표는 이 목록에서 만들어지므로,
+/// 부품을 더하거나 고칠 때 지시문을 따로 손볼 필요가 없다. (새 부품 더하기: README 의 "부품 더하기")
+pub struct Part {
+    pub kind: Kind,
+    pub name: &'static str,
+    /// 기본 크기 (가로 칸, 세로 칸)
+    pub size: (u8, u8),
+    /// 무엇에 쓰는 부품인가 (모델이 고를 때 읽는다)
+    pub purpose: &'static str,
+    /// 필드: (이름, 글자 한도, 모델에게 보일 설명). 설명이 비어 있으면 프로그램이 안에서만 쓰는 필드다.
+    pub fields: &'static [(&'static str, usize, &'static str)],
+    /// 항목의 형식. 비어 있으면 항목이 없는 부품이다.
+    pub items: &'static str,
+}
+
+/// 등록된 부품들. 여기 적힌 순서대로 모델에게 소개된다.
+pub const PARTS: &[Part] = &[
+    Part { kind: Kind::Status, name: "status", size: (2, 1), purpose: "상태 한 가지", fields: &[("state", 8, "state: ok/run/wait/fail/idle"), ("text", 80, "text(80)")], items: "" },
+    Part {
+        kind: Kind::Metric,
+        name: "metric",
+        size: (2, 2),
+        purpose: "숫자 하나",
+        fields: &[("value", 14, "value(14)"), ("unit", 8, "unit(8)"), ("delta", 14, "delta(14, +/-로 시작하면 색이 붙음)"), ("text", 60, "text(60)")],
+        items: "",
+    },
+    Part {
+        kind: Kind::Chart,
+        name: "chart",
+        size: (4, 3),
+        purpose: "수량을 그림으로: 비교(막대), 변화(꺾은선), 몫(도넛)",
+        fields: &[("unit", 8, "unit(8)"), ("form", 8, "form: bar(기본)/line/donut")],
+        items: "이름 | 숫자",
+    },
+    Part {
+        kind: Kind::Route,
+        name: "route",
+        size: (6, 5),
+        purpose: "경로·동선: 들르는 곳의 위치와 길의 모양, 구간별 거리·시간을 직접 그린다",
+        fields: &[("total", 40, "total(전체 거리·시간, 40)"), ("text", 80, "text(80)")],
+        items: "이름 | 위도,경도 | 다음 곳까지의 거리·시간",
+    },
+    Part {
+        kind: Kind::Draw,
+        name: "draw",
+        size: (5, 4),
+        purpose: "다른 부품으로 안 되는 그림을 직접 그린다: 구조도, 흐름도, 자리 배치, 관계도",
+        fields: &[("text", 80, "text(80)")],
+        items: "도형 | 좌표 | 글 | 색 | 크기",
+    },
+    Part { kind: Kind::Image, name: "image", size: (4, 3), purpose: "그림 파일이나 그림 주소를 그대로 보여 준다: 사진, 캡처, 만든 그림", fields: &[("src", 600, "src: 그림 파일의 절대 경로 또는 그림의 웹 주소"), ("text", 80, "text(그림 설명, 80)")], items: "" },
+    Part { kind: Kind::Table, name: "table", size: (4, 3), purpose: "여러 속성의 비교·목록", fields: &[("cols", 200, "cols: 열이름 | 열이름 ...")], items: "칸 | 칸 ... (최대 6칸)" },
+    Part { kind: Kind::Progress, name: "progress", size: (3, 3), purpose: "진행 중인 작업", fields: &[("pct", 3, "pct(0~100)"), ("text", 60, "text(60)")], items: "done/run/todo/fail | 단계 이름" },
+    Part { kind: Kind::Checklist, name: "checklist", size: (3, 3), purpose: "할 일 (사용자가 직접 체크할 수 있음)", fields: &[], items: "done/todo | 내용" },
+    Part {
+        kind: Kind::Decision,
+        name: "decision",
+        size: (3, 3),
+        purpose: "사용자의 결정이 필요한 것 (고르기)",
+        fields: &[("text", 120, "text(질문, 120)"), ("chosen", 24, "")],
+        items: "선택지 이름 | 한 줄 설명",
+    },
+    Part {
+        kind: Kind::Input,
+        name: "input",
+        size: (3, 3),
+        purpose: "사용자에게서 값을 받아야 하는 것 (적어 넣기): 날짜, 이름, 숫자, 주소",
+        fields: &[("text", 120, "text(무엇을 왜 묻는지, 120)"), ("sent", 8, "")],
+        items: "칸 이름 | 안내 글(예시) 또는 칸의 종류: date / number / slider 0~100 단위",
+    },
+    Part { kind: Kind::Timeline, name: "timeline", size: (3, 3), purpose: "시간 순서", fields: &[], items: "시점 | 내용 | done/run/todo(생략 가능)" },
+    Part { kind: Kind::Note, name: "note", size: (3, 2), purpose: "위 어느 것으로도 안 되는 짧은 글", fields: &[("text", 240, "text(240)")], items: "" },
+    Part { kind: Kind::Web, name: "web", size: (6, 5), purpose: "웹 페이지나 HTML 파일을 그대로 보여 주는 작은 브라우저", fields: &[("url", 600, "url: 웹 주소 또는 내 컴퓨터의 파일 절대 경로")], items: "" },
 ];
 
+/// 모델에게 줄 부품 표 (마크다운). 등록된 내용에서 만든다.
+pub fn parts_table() -> String {
+    let mut t = String::from("| 종류 | 용도 | 필드 (글자 한도) | 항목 형식 | 기본 크기 |\n|---|---|---|---|---|\n");
+    for p in PARTS {
+        let fields: Vec<&str> = p.fields.iter().map(|f| f.2).filter(|d| !d.is_empty()).collect();
+        let cell = |s: &str| if s.is_empty() { "없음".to_string() } else { s.replace('|', "\\|") };
+        t += &format!("| {} | {} | {} | {} | {}x{} |\n", p.name, p.purpose, cell(&fields.join(", ")), cell(p.items), p.size.0, p.size.1);
+    }
+    t
+}
+
 impl Kind {
+    fn part(self) -> &'static Part {
+        PARTS.iter().find(|p| p.kind == self).expect("모든 종류는 PARTS 에 등록되어 있어야 한다")
+    }
     pub fn parse(s: &str) -> Option<Kind> {
-        KINDS.iter().find(|k| k.1 == s).map(|k| k.0)
+        PARTS.iter().find(|p| p.name == s).map(|p| p.kind)
     }
     pub fn name(self) -> &'static str {
-        KINDS.iter().find(|k| k.0 == self).map(|k| k.1).unwrap_or("?")
+        self.part().name
     }
     pub fn default_size(self) -> (u8, u8) {
-        KINDS.iter().find(|k| k.0 == self).map(|k| k.2).unwrap_or((3, 2))
+        self.part().size
     }
     /// 사용자의 답을 기다리는 카드인가 ("내 차례"로 가져갈 것)
     pub fn asks(self) -> bool {
         matches!(self, Kind::Decision | Kind::Input)
     }
     pub fn has_items(self) -> bool {
-        !matches!(self, Kind::Note | Kind::Status | Kind::Metric | Kind::Web)
+        !self.part().items.is_empty()
     }
     /// 필드별 글자 수 한도. 이 종류에 없는 필드면 None.
     /// 글이 들어가는 자리를 좁게 잡는 것이 이 프로그램의 핵심 제약이다.
     pub fn field_limit(self, field: &str) -> Option<usize> {
-        use Kind::*;
-        Some(match (self, field) {
-            (_, "title") => 40,
-            (Note, "text") => 240,
-            (Status, "state") => 8,
-            (Status, "text") => 80,
-            (Progress, "pct") => 3,
-            (Progress, "text") => 60,
-            (Decision, "text") => 120,
-            (Decision, "chosen") => 24,
-            (Input, "text") => 120,
-            (Input, "sent") => 8,
-            (Table, "cols") => 200,
-            (Metric, "value") => 14,
-            (Metric, "unit") => 8,
-            (Metric, "delta") => 14,
-            (Metric, "text") => 60,
-            (Chart, "unit") => 8,
-            (Chart, "form") => 8,
-            (Route, "total") => 40,
-            (Route, "text") => 80,
-            (Draw, "text") => 80,
-            (Web, "url") => 600,
-            _ => return None,
-        })
+        if field == "title" {
+            return Some(40);
+        }
+        self.part().fields.iter().find(|f| f.0 == field).map(|f| f.1)
     }
 }
 
@@ -119,6 +174,8 @@ pub enum Op {
     Pin { id: String, on: bool },
     Focus { id: String },
     Say { text: String },
+    /// 이름 붙은 값을 정한다. 카드의 글 안에 {이름} 으로 적어 두면 그 자리에 이 값이 보인다 (값이 비면 지운다)
+    Let { name: String, value: String },
     /// 주제를 카드째로 보관함에 내린다 / 다시 꺼낸다
     Archive { topic: String },
     Restore { topic: String },
@@ -184,6 +241,8 @@ pub struct Board {
     pub cards: Vec<Card>,
     /// 보관함. 끝났거나 오래 손대지 않은 주제가 여기로 내려간다.
     pub shelf: Vec<Shelved>,
+    /// 이름 붙은 값들. 여러 카드가 같은 값을 보여 줄 때, 여기 한 곳만 고치면 다 바뀐다.
+    pub vars: BTreeMap<String, String>,
     pub say: String,
     pub focus: Option<String>,
     /// 한도 초과로 잘린 것 등, 다음 턴에 모델에게 알려줄 내용.
@@ -400,6 +459,22 @@ impl Board {
                 self.card_mut(&id)?;
                 self.focus = Some(id);
             }
+            Op::Let { name, value } => {
+                if !valid_id(&name) {
+                    return Err(format!("값의 이름 '{name}' 형식 오류 (영문·숫자로 짧게)"));
+                }
+                if value.trim().is_empty() {
+                    self.vars.remove(&name);
+                } else {
+                    if !self.vars.contains_key(&name) && self.vars.len() >= 64 {
+                        return Err("이름 붙은 값은 64개까지".into());
+                    }
+                    if chars(&value) > CELL_LIMIT {
+                        self.notes.push(format!("값 {name} {CELL_LIMIT}자 초과로 잘림"));
+                    }
+                    self.vars.insert(name, clip(value.trim(), CELL_LIMIT));
+                }
+            }
             Op::Archive { topic } => {
                 let at = self.topics.iter().position(|t| t.id == topic).ok_or_else(|| format!("주제 '{topic}' 없음"))?;
                 let t = self.topics.remove(at);
@@ -504,5 +579,36 @@ mod shelf_tests {
         run(&mut b, "restore trip").unwrap();
         assert_eq!(b.card("k1").unwrap().field("text"), "숙소는 애월");
         assert!(b.shelf.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod part_tests {
+    use super::*;
+
+    #[test]
+    fn every_kind_is_registered_once_and_listed_for_the_model() {
+        let table = parts_table();
+        for p in PARTS {
+            assert_eq!(PARTS.iter().filter(|q| q.name == p.name).count(), 1, "{} 가 두 번 등록됨", p.name);
+            assert_eq!(Kind::parse(p.name), Some(p.kind));
+            assert!(table.contains(&format!("| {} |", p.name)));
+        }
+        // 안에서만 쓰는 필드는 표에 나오지 않지만 받기는 한다.
+        assert!(!table.contains("chosen"));
+        assert_eq!(Kind::Decision.field_limit("chosen"), Some(24));
+        assert_eq!(Kind::Note.field_limit("text"), Some(240));
+        assert_eq!(Kind::Note.field_limit("nope"), None);
+    }
+
+    #[test]
+    fn named_values_can_be_set_and_cleared() {
+        let mut b = Board::default();
+        let run = |b: &mut Board, line: &str| b.apply(crate::lang::parse(line).unwrap().unwrap(), Author::Ai);
+        run(&mut b, "let budget 120만원").unwrap();
+        assert_eq!(b.vars.get("budget").map(String::as_str), Some("120만원"));
+        assert!(crate::lang::serialize(&b).contains("let budget 120만원"));
+        run(&mut b, "let budget").unwrap();
+        assert!(b.vars.is_empty());
     }
 }

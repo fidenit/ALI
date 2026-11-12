@@ -56,3 +56,75 @@ pub fn from_file(path: &str) -> Result<Pic, String> {
     let img = image::load_from_memory(&bytes).map_err(|e| format!("{path}: 그림으로 읽을 수 없음 ({e})"))?;
     prepare(img)
 }
+
+// ---------------------------------------------------------------------------
+// 보드의 그림 카드에 보여 줄 그림. 읽고 푸는 일은 뒤에서 하고, 다 되면 화면에 올린다.
+
+enum Slot {
+    Loading,
+    Decoded(usize, usize, Vec<u8>),
+    Ready(eframe::egui::TextureHandle, [f32; 2]),
+    Failed(String),
+}
+
+/// 그림 카드가 지금 보여 줄 수 있는 것
+pub enum Shown {
+    Ready(eframe::egui::TextureId, [f32; 2]),
+    Loading,
+    Failed(String),
+}
+
+static SHOWN: std::sync::Mutex<Option<std::collections::HashMap<String, Slot>>> = std::sync::Mutex::new(None);
+
+/// 불러 둔 그림을 잊는다 (초기화했을 때).
+pub fn forget() {
+    *SHOWN.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn fetch(src: &str) -> Result<(usize, usize, Vec<u8>), String> {
+    let lower = src.to_lowercase();
+    let bytes = if lower.starts_with("http://") || lower.starts_with("https://") {
+        let mut resp = crate::agent::http().get(src).header("user-agent", "ALI-desktop/0.1").call().map_err(|e| format!("그림을 받지 못함: {e}"))?;
+        if resp.status().as_u16() != 200 {
+            return Err(format!("그림을 받지 못함 (HTTP {})", resp.status().as_u16()));
+        }
+        resp.body_mut().with_config().limit(20_000_000).read_to_vec().map_err(|e| format!("그림을 받지 못함: {e}"))?
+    } else {
+        let path = src.trim_start_matches("file:///").trim_start_matches("file://");
+        std::fs::read(path).map_err(|e| format!("그림 파일을 열지 못함: {e}"))?
+    };
+    let img = image::load_from_memory(&bytes).map_err(|_| "그림으로 읽을 수 없는 파일".to_string())?;
+    let img = if img.width().max(img.height()) > 1400 { img.resize(1400, 1400, image::imageops::FilterType::Triangle) } else { img };
+    let rgba = img.to_rgba8();
+    Ok((rgba.width() as usize, rgba.height() as usize, rgba.into_raw()))
+}
+
+/// 이 그림을 화면에 그릴 수 있게 준비한다. 처음 부르면 뒤에서 불러오기 시작하고, 준비되면 그 뒤로는 바로 돌려준다.
+pub fn show(ctx: &eframe::egui::Context, src: &str) -> Shown {
+    let mut guard = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(Default::default);
+    if let Some(Slot::Decoded(w, h, rgba)) = map.get(src) {
+        let image = eframe::egui::ColorImage::from_rgba_unmultiplied([*w, *h], rgba);
+        let size = [*w as f32, *h as f32];
+        let tex = ctx.load_texture(format!("img:{src}"), image, Default::default());
+        map.insert(src.to_string(), Slot::Ready(tex, size));
+    }
+    match map.get(src) {
+        Some(Slot::Ready(tex, size)) => Shown::Ready(tex.id(), *size),
+        Some(Slot::Failed(why)) => Shown::Failed(why.clone()),
+        Some(_) => Shown::Loading,
+        None => {
+            map.insert(src.to_string(), Slot::Loading);
+            let (src, ctx) = (src.to_string(), ctx.clone());
+            std::thread::spawn(move || {
+                let slot = match fetch(&src) {
+                    Ok((w, h, rgba)) => Slot::Decoded(w, h, rgba),
+                    Err(why) => Slot::Failed(why),
+                };
+                SHOWN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(src, slot);
+                ctx.request_repaint();
+            });
+            Shown::Loading
+        }
+    }
+}

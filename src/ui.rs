@@ -311,7 +311,10 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
     // "내 차례": 지금 사용자 앞에 가져온 일 하나. 판이 아니라 왼쪽 자리에 그리므로 위치는 그 자리의 왼쪽 위(0, 0) 기준이다.
     if with_inbox {
         if let Some(c) = asks.first() {
-            let h = eff_h(c, view);
+            let h = match view.cards.get(&c.id) {
+                Some(v) if v.content_h > 0.0 => (((HEAD + v.content_h + 12.0 + GAP) / (CH + GAP)).ceil() as i32).clamp(1, 12),
+                _ => eff_h(c, view),
+            };
             slots.insert(c.id.clone(), Slot { pos: vec2(0.0, 0.0), w: INBOX_COLS, h, col: 0, row: 0, origin: vec2(0.0, 0.0), limit: INBOX_COLS, sticky: true });
             let size = vec2(INBOX_COLS as f32 * (CW + GAP) - GAP, h as f32 * (CH + GAP) - GAP);
             zones.push(Zone { id: INBOX_ID.into(), name: "내 차례".into(), min: vec2(0.0, 0.0), size, inbox: true });
@@ -411,7 +414,9 @@ struct Ctx<'a> {
     /// 카드를 끌거나 크기를 바꾸는 중인가
     lifted: bool,
     /// 입력 카드의 글자 칸이 놓일 자리 (자리, 항목 ID, 안내 글, 처음 값). 실제 입력 칸은 본문을 그린 뒤에 그 자리에 올린다.
-    fields: &'a mut Vec<(Rect, String, String, String)>,
+    fields: &'a mut Vec<(Rect, String, String, String, bool)>,
+    /// 입력 카드에서 누르거나 끌어서 정한 값 (달력, 슬라이더). 본문을 그린 뒤에 반영한다.
+    input_ops: &'a mut Vec<(String, String)>,
     /// 입력 카드에 지금 적혀 있는 글
     inputs: &'a HashMap<String, String>,
 }
@@ -652,7 +657,8 @@ pub fn board(
                 v.sticky = s.sticky;
             }
             let Some(v) = view.cards.get_mut(&cid) else { continue };
-            let c = v.snap.clone();
+            // 글 안의 {이름} 은 이름 붙은 값으로 바꿔서 그린다.
+            let c = if board.vars.is_empty() { v.snap.clone() } else { with_values(&v.snap, &board.vars) };
 
             // 등장: 아래에서 살짝 올라오며 나타남. 퇴장: 살짝 줄어들며 사라짐.
             let t_in = ease_out_cubic(unit(now, v.born, T_IN));
@@ -816,9 +822,11 @@ pub fn board(
             if body.height() > 4.0 && detail > 0.02 {
                 let mut bp = p.with_clip_rect(body.expand2(vec2(2.0, 0.0)).intersect(p.clip_rect()));
                 bp.set_opacity(alpha * detail);
-                let mut fields: Vec<(Rect, String, String, String)> = Vec::new();
+                let mut fields: Vec<(Rect, String, String, String, bool)> = Vec::new();
+                let mut input_ops: Vec<(String, String)> = Vec::new();
                 let mut cx = Ctx {
                     fields: &mut fields,
+                    input_ops: &mut input_ops,
                     inputs: &v.inputs,
                     ui,
                     now,
@@ -835,8 +843,17 @@ pub fn board(
                 let used = draw_body(&mut cx, &bp, body, &c);
                 // 입력 카드: 그려 둔 자리에 실제 글자 칸을 올린다. Enter 를 누르면 보낸다.
                 let mut submit = false;
-                for (r, item, hint, initial) in fields {
+                for (key, value) in input_ops {
+                    v.inputs.insert(key, value);
+                }
+                for (r, item, hint, initial, numeric) in fields {
+                    if !body.expand(1.0).contains_rect(r) {
+                        continue;
+                    }
                     let buf = v.inputs.entry(item).or_insert(initial);
+                    if numeric {
+                        buf.retain(|ch| ch.is_ascii_digit() || ".,-".contains(ch));
+                    }
                     let edit = egui::TextEdit::singleline(buf).frame(egui::Frame::NONE).hint_text(hint).font(font(14.0)).text_color(TEXT).desired_width(r.width());
                     let resp = ui.put(r, edit);
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -1154,6 +1171,50 @@ fn state_dot(p: &Painter, c: Pos2, state: &str, now: f64, moving: &mut bool) {
 }
 
 /// 부품 종류별 본문. 반환값은 내용이 실제로 차지한 높이.
+/// 입력 칸의 종류. 항목의 둘째 칸이 date / number / slider 0~100 단위 이면 그 종류, 아니면 글을 적는 칸(둘째 칸은 안내 글).
+enum InputKind {
+    Text,
+    Number,
+    Date,
+    Slider(f32, f32, String),
+}
+
+fn input_kind(spec: &str) -> InputKind {
+    let s = spec.trim();
+    match s {
+        "date" | "날짜" => return InputKind::Date,
+        "number" | "숫자" => return InputKind::Number,
+        _ => {}
+    }
+    if let Some(rest) = s.strip_prefix("slider") {
+        let mut words = rest.split_whitespace();
+        if let Some((a, b)) = words.next().and_then(|r| r.split_once('~')) {
+            if let (Ok(lo), Ok(hi)) = (a.trim().parse::<f32>(), b.trim().parse::<f32>()) {
+                if hi > lo {
+                    return InputKind::Slider(lo, hi, words.collect::<Vec<_>>().join(" "));
+                }
+            }
+        }
+    }
+    InputKind::Text
+}
+
+/// 카드의 글 안에 있는 {이름} 을 이름 붙은 값으로 바꾼 사본.
+fn with_values(card: &Card, vars: &std::collections::BTreeMap<String, String>) -> Card {
+    let mut c = card.clone();
+    let fill = |s: &mut String| {
+        if s.contains('{') {
+            for (name, value) in vars {
+                *s = s.replace(&format!("{{{name}}}"), value);
+            }
+        }
+    };
+    fill(&mut c.title);
+    c.fields.values_mut().for_each(fill);
+    c.items.iter_mut().flat_map(|(_, cells)| cells.iter_mut()).for_each(fill);
+    c
+}
+
 /// 입력 카드를 보낼 때 나가는 조작: 칸마다 적은 값을 항목의 셋째 칸에 넣고, 보냈다는 표시를 한다.
 fn input_lines(c: &Card, inputs: &HashMap<String, String>) -> Vec<String> {
     let clean = |s: &str| s.replace(['|', '\n', '\r'], " ").trim().chars().take(crate::core::CELL_LIMIT).collect::<String>();
@@ -1682,30 +1743,133 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
         }
 
         Kind::Input => {
-            // 사용자가 값을 직접 적어 넣는 카드: 항목마다 이름과 글자 칸, 맨 아래에 보내기.
+            // 사용자가 값을 직접 넣는 카드: 항목마다 이름과 입력 칸(글, 숫자, 날짜, 슬라이더), 맨 아래에 보내기.
             let mut y = top + wrapped(p, body.min, w, c.field("text"), 14.5, SOFT) + 12.0;
             let sent = !c.field("sent").is_empty();
+            let editable = !sent && cx.live && cx.alpha >= 0.9;
             for (item, cells) in &c.items {
                 let (rp, dy) = cx.row(p, item);
                 rp.text(pos2(x + 2.0, y + dy), Align2::LEFT_TOP, &cells[0], font(12.0), DIM);
-                let r = Rect::from_min_size(pos2(x, y + dy + 19.0), vec2(w, 36.0));
-                rp.rect_filled(r, 11.0, RAISED);
-                rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                let spec = cells.get(1).map(|s| s.trim()).unwrap_or("");
                 let answer = cells.get(2).cloned().unwrap_or_default();
-                let hint = cells.get(1).filter(|h| h.as_str() != "-").cloned().unwrap_or_default();
-                if sent || !cx.live || cx.alpha < 0.9 {
-                    // 이미 보냈거나 멀리서 보는 중: 적힌 값만 보여 준다.
-                    let shown = cx.inputs.get(item).cloned().filter(|v| !v.is_empty()).unwrap_or(answer);
-                    let inner = rp.with_clip_rect(r.shrink2(vec2(12.0, 0.0)).intersect(rp.clip_rect()));
-                    if shown.is_empty() {
-                        inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &hint, font(14.0), FAINT);
-                    } else {
-                        inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &shown, font(14.0), TEXT);
+                let value = cx.inputs.get(item).cloned().filter(|v| !v.is_empty()).unwrap_or_else(|| answer.clone());
+                let r = Rect::from_min_size(pos2(x, y + dy + 19.0), vec2(w, 36.0));
+                let mut extra = 0.0;
+                match input_kind(spec) {
+                    InputKind::Slider(lo, hi, unit) => {
+                        // 범위 안에서 끌어서 정한다. 손대기 전에는 값이 없는 것으로 친다(보내지 않는다).
+                        let touched = !value.is_empty();
+                        let cur = value.parse::<f32>().unwrap_or(lo).clamp(lo, hi);
+                        let track = Rect::from_min_max(pos2(r.left() + 8.0, r.center().y - 3.0), pos2(r.right() - 92.0, r.center().y + 3.0));
+                        let k = if hi > lo { (cur - lo) / (hi - lo) } else { 0.0 };
+                        let knob = pos2(track.left() + track.width() * k, track.center().y);
+                        rp.rect_filled(track, 3.0, RAISED);
+                        rp.rect_filled(Rect::from_min_max(track.min, pos2(knob.x, track.max.y)), 3.0, if touched { SOFT } else { BORDER });
+                        rp.circle_filled(knob, 8.0, if touched { TEXT } else { DIM });
+                        let shown = if touched { format!("{}{}", trim_num(cur), if unit.is_empty() { String::new() } else { format!(" {unit}") }) } else { format!("{}~{} {unit}", trim_num(lo), trim_num(hi)) };
+                        rp.with_clip_rect(Rect::from_min_max(pos2(track.right() + 12.0, r.top()), r.max).intersect(rp.clip_rect())).text(pos2(r.right(), r.center().y), Align2::RIGHT_CENTER, shown, bold(13.0), if touched { TEXT } else { FAINT });
+                        if editable {
+                            let grab = Rect::from_min_max(pos2(track.left() - 10.0, r.top()), pos2(track.right() + 10.0, r.bottom()));
+                            let resp = cx.ui.interact(grab, cx.id.with(("slider", item.as_str())), Sense::click_and_drag()).on_hover_cursor(CursorIcon::PointingHand);
+                            if resp.dragged() || resp.clicked() || resp.is_pointer_button_down_on() {
+                                if let Some(pt) = resp.interact_pointer_pos() {
+                                    let t = ((pt.x - track.left()) / track.width()).clamp(0.0, 1.0);
+                                    let step = if hi - lo >= 20.0 { 1.0 } else if hi - lo >= 2.0 { 0.1 } else { 0.01 };
+                                    let v = ((lo + (hi - lo) * t) / step).round() * step;
+                                    cx.input_ops.push((item.clone(), if step >= 1.0 { format!("{v:.0}") } else if step >= 0.1 { format!("{v:.1}") } else { format!("{v:.2}") }));
+                                }
+                            }
+                        }
                     }
-                } else {
-                    cx.fields.push((r.shrink2(vec2(12.0, 7.0)), item.clone(), hint, answer));
+                    InputKind::Date => {
+                        // 달력에서 고른다. 칸을 누르면 아래에 달력이 펼쳐진다.
+                        rp.rect_filled(r, 11.0, RAISED);
+                        rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                        let open_key = format!("{item}#open");
+                        let open = editable && cx.inputs.get(&open_key).map(|v| v == "1").unwrap_or(false);
+                        if value.is_empty() {
+                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, "날짜 고르기", font(14.0), FAINT);
+                        } else {
+                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT);
+                        }
+                        rp.text(pos2(r.right() - 14.0, r.center().y), Align2::RIGHT_CENTER, if open { "닫기" } else { "달력" }, font(11.0), DIM);
+                        if editable && cx.click(r, ("date", item.as_str())).map(|x| x.clicked()).unwrap_or(false) {
+                            cx.input_ops.push((open_key.clone(), if open { "0".into() } else { "1".into() }));
+                        }
+                        if open {
+                            let today = crate::sys::now_local().0;
+                            let ym_key = format!("{item}#ym");
+                            let ym = cx.inputs.get(&ym_key).cloned().unwrap_or_else(|| if value.len() >= 7 { value[..7].to_string() } else { today.chars().take(7).collect() });
+                            let (yy, mm) = ym.split_once('-').and_then(|(a, b)| Some((a.parse::<i32>().ok()?, b.parse::<u32>().ok()?))).unwrap_or((2026, 1));
+                            let days = match mm {
+                                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                                4 | 6 | 9 | 11 => 30,
+                                _ => if (yy % 4 == 0 && yy % 100 != 0) || yy % 400 == 0 { 29 } else { 28 },
+                            };
+                            // 그 달 1일의 요일 (0 = 일요일)
+                            let offs = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+                            let y2 = if mm < 3 { yy - 1 } else { yy };
+                            let first = ((y2 + y2 / 4 - y2 / 100 + y2 / 400 + offs[(mm as usize - 1) % 12] + 1) % 7) as u32;
+                            let rows = (first + days).div_ceil(7);
+                            let cal_top = r.bottom() + 8.0;
+                            let (cw, chh) = (w / 7.0, 26.0);
+                            // 머리: 이전 달, 연·월, 다음 달
+                            rp.text(pos2(x + w / 2.0, cal_top + 11.0), Align2::CENTER_CENTER, format!("{yy}년 {mm}월"), bold(13.0), TEXT);
+                            for (dir, label, bx) in [(-1i32, "이전", x), (1, "다음", x + w - 44.0)] {
+                                let br = Rect::from_min_size(pos2(bx, cal_top), vec2(44.0, 22.0));
+                                let hov = cx.click(br, (if dir < 0 { "calprev" } else { "calnext" }, item.as_str()));
+                                rp.text(br.center(), Align2::CENTER_CENTER, label, font(11.5), if hov.as_ref().map(|h| h.hovered()).unwrap_or(false) { TEXT } else { DIM });
+                                if hov.map(|h| h.clicked()).unwrap_or(false) {
+                                    let total = yy * 12 + (mm as i32 - 1) + dir;
+                                    cx.input_ops.push((ym_key.clone(), format!("{:04}-{:02}", total.div_euclid(12), total.rem_euclid(12) + 1)));
+                                }
+                            }
+                            let names = ["일", "월", "화", "수", "목", "금", "토"];
+                            for (i, n) in names.iter().enumerate() {
+                                rp.text(pos2(x + cw * (i as f32 + 0.5), cal_top + 34.0), Align2::CENTER_CENTER, *n, font(10.5), FAINT);
+                            }
+                            for d in 1..=days {
+                                let idx = first + d - 1;
+                                let cell = Rect::from_min_size(pos2(x + cw * (idx % 7) as f32, cal_top + 46.0 + chh * (idx / 7) as f32), vec2(cw, chh));
+                                let date = format!("{yy:04}-{mm:02}-{d:02}");
+                                let picked = value.starts_with(&date);
+                                let resp = cx.click(cell, ("day", &format!("{item}{d}")));
+                                let hov = resp.as_ref().map(|h| h.hovered()).unwrap_or(false);
+                                if picked || hov {
+                                    rp.rect_filled(cell.shrink(2.0), 8.0, if picked { SOFT } else { RAISED });
+                                }
+                                if date == today && !picked {
+                                    rp.rect_stroke(cell.shrink(2.0), 8.0, Stroke::new(1.0, EDGE), StrokeKind::Inside);
+                                }
+                                rp.text(cell.center(), Align2::CENTER_CENTER, format!("{d}"), font(12.5), if picked { CARD } else { TEXT });
+                                if resp.map(|h| h.clicked()).unwrap_or(false) {
+                                    cx.input_ops.push((item.clone(), format!("{date} ({})", names[(idx % 7) as usize])));
+                                    cx.input_ops.push((open_key.clone(), "0".into()));
+                                }
+                            }
+                            extra = 46.0 + chh * rows as f32 + 8.0;
+                        }
+                    }
+                    kind => {
+                        // 글 또는 숫자를 적는 칸
+                        rp.rect_filled(r, 11.0, RAISED);
+                        rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER), StrokeKind::Inside);
+                        let numeric = matches!(kind, InputKind::Number);
+                        let hint = if numeric { "숫자".to_string() } else if spec == "-" { String::new() } else { spec.to_string() };
+                        if !editable {
+                            // 이미 보냈거나 멀리서 보는 중: 적힌 값만 보여 준다.
+                            let inner = rp.with_clip_rect(r.shrink2(vec2(12.0, 0.0)).intersect(rp.clip_rect()));
+                            if value.is_empty() {
+                                inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &hint, font(14.0), FAINT);
+                            } else {
+                                inner.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT);
+                            }
+                        } else {
+                            cx.fields.push((r.shrink2(vec2(12.0, 7.0)), item.clone(), hint, answer, numeric));
+                        }
+                    }
                 }
-                y += 19.0 + 36.0 + 10.0;
+                y += 19.0 + 36.0 + 10.0 + extra;
             }
             let br = Rect::from_min_size(pos2(x + w - 92.0, y + 2.0), vec2(92.0, 34.0));
             if sent {
@@ -1722,6 +1886,39 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 }
             }
             y + 36.0 - top
+        }
+
+        Kind::Image => {
+            // 그림 파일이나 그림 주소를 그대로 보여 준다. 카드 안에 비율을 지켜 가장 크게.
+            let src = c.field("src").to_string();
+            let caption = c.field("text").to_string();
+            let h = body.height().max(120.0);
+            let area = Rect::from_min_max(body.min, pos2(body.right(), top + h - if caption.is_empty() { 0.0 } else { 24.0 }));
+            if src.is_empty() {
+                p.rect_filled(area, 10.0, RAISED);
+                p.text(area.center(), Align2::CENTER_CENTER, "그림이 아직 없습니다", font(12.0), FAINT);
+            } else {
+                match crate::pics::show(cx.ui.ctx(), &src) {
+                    crate::pics::Shown::Ready(id, size) => {
+                        let k = (area.width() / size[0]).min(area.height() / size[1]).min(1.5);
+                        let r = Rect::from_center_size(area.center(), vec2(size[0] * k, size[1] * k));
+                        p.image(id, r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                    }
+                    crate::pics::Shown::Loading => {
+                        p.rect_filled(area, 10.0, RAISED);
+                        p.text(area.center(), Align2::CENTER_CENTER, "그림을 불러오는 중", font(12.0), FAINT);
+                        *cx.moving = true;
+                    }
+                    crate::pics::Shown::Failed(why) => {
+                        p.rect_filled(area, 10.0, RAISED);
+                        p.with_clip_rect(area.shrink(8.0).intersect(p.clip_rect())).text(area.center(), Align2::CENTER_CENTER, why, font(12.0), RED);
+                    }
+                }
+            }
+            if !caption.is_empty() {
+                p.with_clip_rect(Rect::from_min_max(pos2(x, area.bottom()), pos2(body.right(), top + h)).intersect(p.clip_rect())).text(pos2(x + 2.0, area.bottom() + 13.0), Align2::LEFT_CENTER, &caption, font(12.0), DIM);
+            }
+            h
         }
 
         Kind::Decision => {

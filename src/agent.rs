@@ -7,7 +7,11 @@ use serde_json::{Value, json};
 
 use crate::llm::{Config, Msg, Stats};
 
-const SYSTEM: &str = include_str!("prompt.md");
+/// 지시문. 부품 표는 등록된 부품 목록에서 만들어 끼워 넣는다 (프로그램이 떠 있는 동안 한 번만 만든다: 바뀌면 캐시가 깨진다).
+fn system() -> &'static str {
+    static BUILT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| include_str!("prompt.md").replace("{{PARTS}}", crate::core::parts_table().trim_end()))
+}
 /// 사용자가 멈춰서 턴이 끝났다는 표시
 pub const STOPPED: &str = "__stopped";
 const URL: &str = "https://api.anthropic.com/v1/messages";
@@ -92,7 +96,7 @@ struct Reply {
 /// `images` 는 사용자가 이번 말에 붙인 사진 (형식, base64).
 /// `added` 는 일하는 도중에 사용자가 덧붙인 말을 꺼내 오는 함수 (없으면 None). 도구를 한 차례 쓴 뒤마다 불린다.
 pub fn run(cfg: &Config, key: &str, turn_text: &str, images: &[(String, String)], added: &dyn Fn() -> Result<Option<String>, String>, send: &dyn Fn(Msg)) -> Result<Stats, String> {
-    let role = Role { system: SYSTEM, tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| added(), tool: &|_, _| None };
+    let role = Role { system: system(), tools: crate::tools::definitions(false), max_steps: MAX_STEPS, check: &|| added(), tool: &|_, _| None };
     run_as(cfg, key, &role, turn_text, images, send).map(|(stats, _)| stats)
 }
 

@@ -94,6 +94,10 @@ pub fn parse(line: &str) -> Result<Option<Op>, String> {
                 _ => return Err("move <id> <열> <행>".into()),
             }
         }
+        "let" => {
+            let (name, value) = split1(rest);
+            Op::Let { name: need(name, "let <이름> <값>")?.into(), value: value.into() }
+        }
         "archive" => Op::Archive { topic: need(rest, "archive <주제ID>")?.into() },
         "restore" => Op::Restore { topic: need(rest, "restore <주제ID>")?.into() },
         "pin" | "unpin" => Op::Pin { id: need(rest, "ID")?.into(), on: cmd == "pin" },
@@ -115,6 +119,9 @@ pub fn serialize(b: &Board) -> String {
 /// 보드가 아주 커졌을 때, 지금 이야기와 먼 주제는 줄여서 모델에게 보낸다. 줄인 주제에는 `#` 로 시작하는 안내 줄이 붙는다.
 pub fn serialize_with(b: &Board, level: &dyn Fn(&str) -> u8) -> String {
     let mut s = String::new();
+    for (name, value) in &b.vars {
+        s += &format!("let {name} {value}\n");
+    }
     for g in &b.groups {
         s += &format!("group {} {}\n", g.id, g.name);
     }

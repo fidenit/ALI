@@ -375,6 +375,18 @@ impl App {
                         app.fake_marks.push_back((q.len(), format!("{step} (누르고 있는 중)")));
                         q.push_back(vec![egui::Event::PointerButton { pos: p + egui::vec2(*dx, *dy), button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
                     }
+                    (Some("click"), [x, y]) => {
+                        // 짧게 눌렀다 뗀다 (오래 누르면 클릭으로 치지 않는다)
+                        let p = egui::pos2(*x, *y);
+                        q.push_back(vec![egui::Event::PointerMoved(p)]);
+                        q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+                        q.push_back(Vec::new());
+                        q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+                    }
+                    (Some("type"), _) => {
+                        // 글자 입력: "type 12" (앞서 누른 칸에 들어간다)
+                        q.push_back(vec![egui::Event::Text(step.trim_start_matches("type").trim().to_string())]);
+                    }
                     (Some("wheel"), [x, y, amount]) => {
                         q.push_back(vec![egui::Event::PointerMoved(egui::pos2(*x, *y))]);
                         for _ in 0..10 {
@@ -561,6 +573,7 @@ impl App {
         }
         vault::wipe();
         route::forget();
+        pics::forget();
         self.view = ui::View::default();
         self.webviews.clear();
         self.recent.clear();
