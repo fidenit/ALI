@@ -1186,8 +1186,16 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             // 이 자리 위에 실제 브라우저 화면이 올라간다. 여기서는 자리와 주소만 알려 준다.
             let url = c.field("url").to_string();
             p.rect_filled(body, 10.0, RAISED);
-            let label = if url.is_empty() { "주소가 아직 없습니다" } else { url.as_str() };
-            p.text(body.center(), Align2::CENTER_CENTER, label, font(12.0), FAINT);
+            if url.is_empty() {
+                p.text(body.center(), Align2::CENTER_CENTER, "주소가 아직 없습니다", font(12.0), FAINT);
+            } else {
+                // 페이지는 제 크기(100%)로 화면 안에 다 들어와야 보인다. 그렇지 않을 때는 누르면 그렇게 보이는 자리로 간다.
+                p.text(body.center() - vec2(0.0, 10.0), Align2::CENTER_CENTER, "눌러서 페이지 보기", bold(14.0), SOFT);
+                p.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, "페이지는 카드가 제 크기로 화면에 다 들어와야 보입니다", font(11.5), FAINT);
+                if cx.ui.interact(body, cx.id.with("web-show"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    cx.lines.push(format!("@show {}", c.id));
+                }
+            }
             let shown = body.intersect(cx.ui.clip_rect());
             // 화면 밖으로 반쯤 나갔거나, 끌고 있거나, 나타나고 사라지는 중이면 브라우저 화면은 잠시 숨긴다.
             let visible = cx.live && !cx.lifted && cx.alpha > 0.98 && shown.height() > body.height() - 2.0 && shown.width() > body.width() - 2.0;

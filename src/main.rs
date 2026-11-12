@@ -175,6 +175,8 @@ struct App {
 /// 보이지 않는 창으로 페이지 하나를 열어 글을 읽어 오는 일 (한 번에 하나).
 struct Probe {
     url: String,
+    script: String,
+    needle: String,
     reply: Sender<String>,
     view: Option<wry::WebView>,
     since: std::time::Instant,
@@ -385,7 +387,9 @@ impl App {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_secs(2));
                 let (tx, rx) = channel();
-                jobs::to_ui(llm::Msg::Probe { url, reply: tx });
+                let script = std::env::var("LYBOARD_PROBE_JS").unwrap_or_else(|_| route::PAGE_TEXT.to_string());
+                let needle = std::env::var("LYBOARD_PROBE_NEEDLE").unwrap_or_default();
+                jobs::to_ui(llm::Msg::Probe { url, script, needle, reply: tx });
                 let text = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap_or_else(|_| "응답 없음".into());
                 sys::log("probe.log", &format!("읽은 값: {:?}\n{text}", route::read_summary(&text)));
             });
@@ -1148,13 +1152,13 @@ impl App {
                     self.pre = Some(p);
                 }
                 llm::Msg::Job(ev) => self.job_event(ev),
-                llm::Msg::Probe { url, reply } => {
+                llm::Msg::Probe { url, script, needle, reply } => {
                     if self.probe.is_some() {
                         let _ = reply.send("오류: 다른 페이지를 읽는 중".into());
                     } else {
                         let (tx, got) = channel();
                         let now = std::time::Instant::now();
-                        self.probe = Some(Probe { url, reply, view: None, since: now, polled: now, tx, got, best: String::new() });
+                        self.probe = Some(Probe { url, script, needle, reply, view: None, since: now, polled: now, tx, got, best: String::new() });
                     }
                 }
                 llm::Msg::Keys(i, keys) => self.past.add_keys(i, &keys),
@@ -1346,7 +1350,8 @@ impl App {
         while let Ok(text) = p.got.try_recv() {
             // 스크립트의 결과는 JSON 문자열로 온다.
             let text = serde_json::from_str::<String>(&text).unwrap_or(text);
-            if route::read_summary(&text).is_some() {
+            let ready = if p.needle.is_empty() { route::read_summary(&text).is_some() } else { text.contains(&p.needle) };
+            if ready {
                 let _ = p.reply.send(text);
                 self.probe = None;
                 return;
@@ -1360,11 +1365,11 @@ impl App {
             self.probe = None;
             return;
         }
-        if p.since.elapsed().as_millis() > 2500 && p.polled.elapsed().as_millis() > 800 {
+        if p.since.elapsed().as_millis() > 1800 && p.polled.elapsed().as_millis() > 500 {
             p.polled = std::time::Instant::now();
             let tx = p.tx.clone();
             if let Some(v) = &p.view {
-                let _ = v.evaluate_script_with_callback("(document.body ? document.body.innerText : '').slice(0, 8000)", move |r| {
+                let _ = v.evaluate_script_with_callback(&p.script, move |r| {
                     let _ = tx.send(r);
                 });
             }
@@ -1582,6 +1587,11 @@ impl eframe::App for App {
                 self.sync_webviews(frame, webs, ctx.zoom_factor());
                 self.run_probe(frame, &ctx);
                 for l in lines {
+                    // 화면 쪽에만 해당하는 부탁 (보드를 바꾸는 조작이 아니다)
+                    if let Some(id) = l.strip_prefix("@show ") {
+                        self.view.show_card(id.to_string());
+                        continue;
+                    }
                     self.apply_line(&l, Author::User);
                 }
                 if let Some(id) = clicked {

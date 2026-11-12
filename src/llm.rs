@@ -25,7 +25,8 @@ pub enum Msg {
     Board { topic: String, reply: Sender<String> },
     /// 보이지 않는 창으로 이 주소의 페이지를 열어, `ready` 가 들어 있는 글이 나오면 그 화면의 글을 돌려 달라는 요청
     /// (지도 서비스에서 경로의 거리·시간을 읽어 올 때 쓴다)
-    Probe { url: String, reply: Sender<String> },
+    /// `script` 의 결과에 `needle` 이 들어 있으면 그 결과를 돌려준다 (needle 이 비어 있으면 경로의 거리·시간이 읽힐 때).
+    Probe { url: String, script: String, needle: String, reply: Sender<String> },
     /// 기억 정리가 끝나서, 턴 하나에 "찾을 때 쓸 낱말"이 붙었다 (턴 번호, 낱말들)
     Keys(usize, String),
     /// 일하는 도중에 사용자가 덧붙인 말이 모델에게 전해졌다

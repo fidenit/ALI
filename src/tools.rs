@@ -72,7 +72,7 @@ pub fn definitions(worker: bool) -> Value {
                         "type": "object",
                         "properties": {
                             "name": { "type": "string", "description": "카드에 보일 짧은 이름" },
-                            "find": { "type": "string", "description": "위치를 찾을 검색어 (생략하면 name 으로 찾는다). 상호가 안 나오면 동네 이름이나 도로명 주소" },
+                            "find": { "type": "string", "description": "카카오맵에서 이 곳을 찾을 검색어 (생략하면 name). 상호에 지역을 붙이면 정확하다: 강릉 솔향 펜션, 홍천 비발디파크. 주소를 알면 주소도 된다" },
                             "lat": { "type": "number" },
                             "lng": { "type": "number" },
                         },

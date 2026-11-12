@@ -14,6 +14,9 @@ use crate::sys;
 /// (위도, 경도)
 pub type Point = (f64, f64);
 
+/// 페이지에 보이는 글을 읽는 스크립트
+pub const PAGE_TEXT: &str = "(document.body ? document.body.innerText : '').slice(0, 8000)";
+
 static CACHE: Mutex<Option<HashMap<String, Option<Arc<Vec<Point>>>>>> = Mutex::new(None);
 
 fn file(card: &str) -> std::path::PathBuf {
@@ -59,6 +62,57 @@ pub fn geocode(query: &str) -> Result<(String, Point), String> {
         (Some(lat), Some(lng)) => Ok((p["display_name"].as_str().unwrap_or("").to_string(), (lat, lng))),
         _ => Err(format!("'{query}' 의 위치를 찾지 못함")),
     }
+}
+
+/// 카카오맵 검색 결과의 첫 몇 곳을 읽는 스크립트. 결과가 나왔거나 9초가 지나도록 없으면 끝에 § 를 붙여 돌려준다.
+const KAKAO_SEARCH: &str = r#"(function(){var l=document.querySelector('#info\\.search\\.place\\.list');var its=l?[].slice.call(l.querySelectorAll('li.PlaceItem'),0,3):[];var out=its.map(function(it){var g=function(s){var e=it.querySelector(s);return e?(e.getAttribute('title')||e.textContent||'').trim():''};return {name:g('[data-id=name]'),kind:g('[data-id=subcategory]'),addr:g('[data-id=address]'),lot:g('[data-id=otherAddr]')}});if(out.length)return JSON.stringify(out)+'§';return performance.now()>9000?'[]§':''})()"#;
+
+/// 카카오맵에서 찾은 장소
+pub struct Place {
+    pub name: String,
+    pub kind: String,
+    /// 도로명 주소
+    pub addr: String,
+    /// 지번 주소 (읍면동부터)
+    pub lot: String,
+}
+
+/// 카카오맵에서 장소를 찾는다 (상호 검색이 정확하다). 보이지 않는 창으로 검색 화면을 열어 첫 결과를 읽는다.
+pub fn kakao_place(query: &str) -> Result<Place, String> {
+    let url = format!("https://map.kakao.com/link/search/{}", encode(query));
+    let (tx, rx) = std::sync::mpsc::channel();
+    if !crate::jobs::to_ui(crate::llm::Msg::Probe { url, script: KAKAO_SEARCH.to_string(), needle: "§".to_string(), reply: tx }) {
+        return Err("화면 쪽에 요청하지 못함".into());
+    }
+    let text = rx.recv_timeout(std::time::Duration::from_secs(26)).map_err(|_| "카카오맵에서 답이 오지 않음".to_string())?;
+    let list: Value = serde_json::from_str(text.trim_end_matches('§')).map_err(|_| format!("카카오맵에서 '{query}' 를 찾지 못함"))?;
+    let first = list.get(0).ok_or_else(|| format!("카카오맵에 '{query}' 로 나오는 곳이 없음"))?;
+    let s = |k: &str| first[k].as_str().unwrap_or("").trim().to_string();
+    Ok(Place { name: s("name"), kind: s("kind"), addr: s("addr"), lot: s("lot").trim_start_matches("(지번)").trim().to_string() })
+}
+
+/// 카카오맵이 알려 준 주소를 좌표로 바꾼다. 도로명 주소로 찾고(같은 이름의 길이 여러 토막이면 지번 주소의 동·리가 맞는 것),
+/// 안 되면 동·리 단위로 찾는다. 길을 찾는 데는 이 정도면 된다 (가까운 도로로 옮겨서 쓴다).
+fn locate(place: &Place) -> Result<Point, String> {
+    let village = place.lot.split_whitespace().take_while(|w| !w.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)).collect::<Vec<_>>();
+    let near = village.last().copied().unwrap_or("");
+    if !place.addr.is_empty() {
+        if let Ok(v) = get(&format!("https://nominatim.openstreetmap.org/search?q={}&format=jsonv2&limit=5&accept-language=ko", encode(&place.addr))) {
+            let rows = v.as_array().cloned().unwrap_or_default();
+            let pick = rows.iter().find(|r| !near.is_empty() && r["display_name"].as_str().unwrap_or("").contains(near)).or_else(|| rows.first());
+            if let Some(r) = pick {
+                let num = |k: &str| r[k].as_str().and_then(|x| x.parse::<f64>().ok());
+                if let (Some(lat), Some(lng)) = (num("lat"), num("lon")) {
+                    return Ok((lat, lng));
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    }
+    // 시·군까지는 도로명 주소에서, 읍·면·동·리는 지번 주소에서
+    let region: Vec<&str> = place.addr.split_whitespace().take(2).collect();
+    let query = format!("{} {}", region.join(" "), village.join(" "));
+    geocode(query.trim()).map(|g| g.1).map_err(|_| format!("'{}' 의 주소({})를 좌표로 바꾸지 못함", place.name, place.addr))
 }
 
 /// 구글이 쓰는 방식으로 줄여 적은 선을 푼다 (정밀도 5자리).
@@ -120,8 +174,14 @@ pub fn find(input: &Value) -> Result<String, String> {
                 if n > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(1100)); // 좌표 찾기 서비스의 사용 규칙: 1초에 한 번
                 }
-                let (matched, at) = geocode(query).map_err(|e| format!("{e}. 이 곳은 find 에 동네 이름이나 도로명 주소를 주거나, lat·lng 을 직접 준다"))?;
-                found.push((name, at, matched));
+                // 장소는 카카오맵에서 찾는다 (상호까지 정확하다). 거기서 못 찾으면 오픈스트리트맵에서 이름으로 찾아본다.
+                match kakao_place(query).and_then(|p| locate(&p).map(|at| (p, at))) {
+                    Ok((p, at)) => found.push((name, at, format!("{} ({}) {}", p.name, p.kind, p.addr))),
+                    Err(why) => {
+                        let (matched, at) = geocode(query).map_err(|_| format!("{why}. 이 곳의 find 를 카카오맵에서 검색되는 이름(상호와 지역)이나 주소로 바꿔서 다시 찾는다"))?;
+                        found.push((name, at, format!("{matched} (카카오맵에서는 못 찾음: 위치가 정확하지 않을 수 있다)")));
+                    }
+                }
             }
         }
     }
@@ -246,7 +306,7 @@ fn ask_kakao(points: &[(String, Point)]) -> Result<(f64, f64, Option<String>), S
     let path: Vec<String> = points.iter().map(|(name, (lat, lng))| format!("{},{lat:.6},{lng:.6}", encode(&name.replace([',', '/'], " ")))).collect();
     let url = format!("https://map.kakao.com/link/by/car/{}", path.join("/"));
     let (tx, rx) = std::sync::mpsc::channel();
-    if !crate::jobs::to_ui(crate::llm::Msg::Probe { url, reply: tx }) {
+    if !crate::jobs::to_ui(crate::llm::Msg::Probe { url, script: PAGE_TEXT.to_string(), needle: String::new(), reply: tx }) {
         return Err("화면 쪽에 요청하지 못함".into());
     }
     let text = rx.recv_timeout(std::time::Duration::from_secs(26)).map_err(|_| "카카오맵에서 답이 오지 않음".to_string())?;
