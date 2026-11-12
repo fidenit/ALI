@@ -82,6 +82,9 @@ struct App {
     turn_spoken: Vec<String>,
     turn_events: String,
     titlebar_done: bool,
+    shot: Option<String>,
+    shot_from: std::time::Instant,
+    shot_delay: u64,
     /// 이번 턴에서 모델의 출력이나 도구 사용이 시작됐는가 (아직이면 "기다리는 중" 표시)
     got_output: bool,
     sent_at: std::time::Instant,
@@ -100,6 +103,14 @@ struct App {
     quiet_since: Option<std::time::Instant>,
     /// 받아쓰기 결과를 기다리는 중
     stt: Option<Receiver<Result<String, String>>>,
+    /// 화면을 다시 그리게 깨우는 손잡이 (다른 스레드에서 쓴다)
+    wake: egui::Context,
+    /// 판단 모델이 짚은 "구성에서 고칠 것". 있으면 한가할 때 구성 정리 턴을 돌린다.
+    tidy: Option<Vec<String>>,
+    /// 지금 도는 턴이 구성 정리인가
+    tidying: bool,
+    /// 구성 정리를 다시 하기까지 남은 턴 수
+    tidy_rest: u8,
 }
 
 struct Web {
@@ -171,6 +182,9 @@ impl App {
             turn_spoken: Vec::new(),
             turn_events: String::new(),
             titlebar_done: false,
+            shot: std::env::var("LYBOARD_SHOT").ok(),
+            shot_from: std::time::Instant::now(),
+            shot_delay: std::env::var("LYBOARD_SHOT_AT").ok().and_then(|v| v.parse().ok()).unwrap_or(3500),
             got_output: false,
             sent_at: std::time::Instant::now(),
             pre: None,
@@ -182,6 +196,10 @@ impl App {
             heard: false,
             quiet_since: None,
             stt: None,
+            wake: ctx.clone(),
+            tidy: None,
+            tidying: false,
+            tidy_rest: 0,
         };
         sys::register_obsidian_vault(&vault::root()); // 보관함 폴더를 만들고 옵시디언에 등록해 둔다
         // 확인용: 사람이 말하지 않아도 받아쓰기와 마이크를 시험할 수 있게 한다. 결과는 data\stt.log 에 남는다.
@@ -211,6 +229,24 @@ impl App {
                 let _ = std::fs::remove_file(log_path());
             }
             app.start_real_mode();
+        }
+        // 확인용: 지금 보드의 구성을 판단 모델에게 한 번 물어보고 결과를 data\jev.log 에 남긴다.
+        if std::env::var("LYBOARD_STRUCT").is_ok() {
+            let topics: Vec<(String, String, String, String)> = app
+                .board
+                .topics
+                .iter()
+                .filter(|t| app.board.cards.iter().any(|c| c.topic == t.id))
+                .map(|t| {
+                    let titles: Vec<&str> = app.board.cards.iter().filter(|c| c.topic == t.id).map(|c| c.title.as_str()).collect();
+                    (t.id.clone(), t.name.clone(), t.group.clone().unwrap_or_default(), titles.join(", "))
+                })
+                .collect();
+            let groups: Vec<(String, String)> = app.board.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
+            std::thread::spawn(move || {
+                let hints = decide::structure(&topics, &groups);
+                sys::log("jev.log", &format!("구성 시험 결과: {hints:?}"));
+            });
         }
         // 확인용: 시작하자마자 이 주제 쪽으로 날아간다.
         if let Ok(g) = std::env::var("LYBOARD_GOTO") {
@@ -301,6 +337,15 @@ impl App {
             t += &format!("<events>\n{}\n</events>\n", self.events.join("\n"));
         }
         // 판단 모델이 지난 화면을 보고 짚은 것
+        // 구성 정리 턴: 판단 모델이 짚은 것을 전한다.
+        if let Some(hints) = self.tidy.take() {
+            t += &format!("<tidy>
+{}
+</tidy>
+", hints.join("
+"));
+            self.tidying = true;
+        }
         if !self.review.is_empty() {
             t += &format!("<review>\n{}\n</review>\n", std::mem::take(&mut self.review).join("\n"));
         }
@@ -348,7 +393,14 @@ impl App {
         self.react_at = None;
         self.busy = true;
         self.error = None;
-        self.cur_input = if input.is_empty() { format!("(화면에서 직접 조작) {}", self.turn_events) } else { input };
+        let auto = input.is_empty(); // 사용자가 말한 것이 아니라 프로그램이 시작한 턴
+        self.cur_input = if self.tidying {
+            "(분류와 주제 정리)".to_string()
+        } else if auto {
+            format!("(화면에서 직접 조작) {}", self.turn_events)
+        } else {
+            input
+        };
         self.turn_raw.clear();
         self.turn_actions.clear();
         self.turn_spoken.clear();
@@ -359,7 +411,7 @@ impl App {
         self.sent_at = std::time::Instant::now();
         // 판단 모델이 먼저 볼 재료
         let pre = llm::PreInput {
-            input: if self.turn_events.is_empty() || !self.cur_input.starts_with("(화면에서") { self.cur_input.clone() } else { String::new() },
+            input: if auto { String::new() } else { self.cur_input.clone() },
             topics: self.board.topics.iter().map(|t| (t.id.clone(), t.name.clone())).collect(),
             notes: vault::notes(),
             recent: self.recent.iter().rev().take(3).rev().map(|(u, a)| format!("사용자: {u}\n응답: {a}\n")).collect(),
@@ -456,12 +508,37 @@ impl App {
                     (c.id.clone(), topic, c.title.clone())
                 })
                 .collect();
+            // 그리고 분류와 주제의 구성도 본다: 합칠 주제, 나눌 분류, 겹치는 분류.
+            let topics: Vec<(String, String, String, String)> = self
+                .board
+                .topics
+                .iter()
+                .filter(|t| self.board.cards.iter().any(|c| c.topic == t.id))
+                .map(|t| {
+                    let titles: Vec<&str> = self.board.cards.iter().filter(|c| c.topic == t.id).map(|c| c.title.as_str()).collect();
+                    (t.id.clone(), t.name.clone(), t.group.clone().unwrap_or_default(), titles.join(", "))
+                })
+                .collect();
+            let groups: Vec<(String, String)> = self.board.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
             let tx = self.tx.clone();
+            let wake = self.wake.clone();
             std::thread::spawn(move || {
                 if let Some(post) = decide::after(&board, &cards) {
                     let _ = tx.send(llm::Msg::Review(post));
                 }
+                let hints = decide::structure(&topics, &groups);
+                if !hints.is_empty() {
+                    let _ = tx.send(llm::Msg::Tidy(hints));
+                }
+                wake.request_repaint();
             });
+        }
+        // 방금 턴이 구성 정리였으면 한동안 다시 정리하지 않는다 (정리가 정리를 부르지 않게).
+        if self.tidying {
+            self.tidying = false;
+            self.tidy_rest = 3;
+        } else {
+            self.tidy_rest = self.tidy_rest.saturating_sub(1);
         }
         // 이 턴을 오늘의 기록 노트에 남긴다 (시연 모드는 남기지 않는다).
         if !self.cfg.demo() {
@@ -495,6 +572,11 @@ impl App {
                         self.turn_spoken.push(ack);
                     }
                     self.pre = Some(p);
+                }
+                llm::Msg::Tidy(hints) => {
+                    if self.tidy_rest == 0 {
+                        self.tidy = Some(hints);
+                    }
                 }
                 llm::Msg::Review(post) => {
                     self.review = post
@@ -693,6 +775,7 @@ impl App {
         }
         let text: usize = self.board.cards.iter().map(card_chars).sum();
         parts.push(format!("카드 {} · 화면 글자 {}", self.board.cards.len(), text));
+        parts.push(format!("확대 {:.0}% (스크롤로 확대·축소, 빈 곳을 끌어 이동, 두 번 눌러 전체 보기)", self.view.zoom * 100.0));
         if !self.rejects.is_empty() {
             parts.push(format!("거부된 명령 {}", self.rejects.len()));
         }
@@ -719,6 +802,14 @@ fn card_chars(c: &core::Card) -> usize {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // 확인용: LYBOARD_SHOT=파일.bmp 가 있으면 잠시 뒤 화면을 그 파일로 저장한다 (PC 가 잠겨 있어도 된다).
+        if let Some(path) = self.shot.clone() {
+            if self.shot_from.elapsed().as_millis() as u64 > self.shot_delay {
+                self.shot = None;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |img| save_bmp(&path, &img))));
+            }
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        }
         self.pump();
         let ctx = ui.ctx().clone();
         if !self.titlebar_done {
@@ -737,6 +828,15 @@ impl eframe::App for App {
         }
         let talking = self.tts.is_speaking() || !self.speech.is_empty();
         self.voice_input(&ctx, talking);
+        // 구성 정리: 판단 모델이 고칠 것을 짚었고 사용자가 잠깐 쉬고 있으면, 묻지 않고 한 번 정리한다.
+        if self.tidy.is_some() {
+            let quiet = !self.busy && self.react_at.is_none() && !talking && self.stt.is_none() && !(self.mic.is_some() && self.heard);
+            if quiet && self.input.trim().is_empty() && self.autoplay.is_empty() && self.idle_since.elapsed().as_millis() > 2500 {
+                self.start_turn(&ctx, String::new());
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(300));
+            }
+        }
         if !self.autoplay.is_empty() {
             if !self.busy && !talking && self.idle_since.elapsed().as_millis() > 1200 {
                 // 확인용 대본에서는 "|" 가 입력 구분자라서, 조작 줄 안의 "|" 는 "¦" 로 적는다.
@@ -808,7 +908,9 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
             .with_inner_size([1560.0, 920.0])
-            .with_active(!quiet),
+            .with_active(!quiet)
+            // 확인용: 창을 띄울 위치 (LYBOARD_POS="x,y")
+            .with_position(std::env::var("LYBOARD_POS").ok().and_then(|v| v.split_once(',').and_then(|(x, y)| Some([x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?]))).unwrap_or([80.0, 60.0])),
         ..Default::default()
     };
     eframe::run_native(
@@ -825,4 +927,30 @@ fn main() -> eframe::Result {
             Ok(Box::new(App::new(&cc.egui_ctx)))
         }),
     )
+}
+
+/// 화면 그림을 24비트 BMP 로 저장한다 (확인용. 외부 라이브러리 없이 쓸 수 있는 가장 단순한 그림 형식).
+fn save_bmp(path: &str, img: &egui::ColorImage) {
+    let (w, h) = (img.size[0], img.size[1]);
+    let row = (w * 3).div_ceil(4) * 4;
+    let mut out = Vec::with_capacity(54 + row * h);
+    out.extend_from_slice(b"BM");
+    out.extend_from_slice(&((54 + row * h) as u32).to_le_bytes());
+    out.extend_from_slice(&[0, 0, 0, 0]);
+    out.extend_from_slice(&54u32.to_le_bytes());
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&24u16.to_le_bytes());
+    out.extend_from_slice(&[0u8; 24]);
+    for y in (0..h).rev() {
+        let start = out.len();
+        for x in 0..w {
+            let c = img.pixels[y * w + x];
+            out.extend_from_slice(&[c.b(), c.g(), c.r()]);
+        }
+        out.resize(start + row, 0);
+    }
+    let _ = std::fs::write(path, out);
 }

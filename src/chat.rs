@@ -155,6 +155,7 @@ impl App {
         } else if !self.got_output {
             match self.pre.as_ref().and_then(|p| p.kind.clone()) {
                 Some(kind) => format!("{kind} · 생각하는 중"),
+                None if self.tidying => "분류와 주제 정리 중".to_string(),
                 None => "생각하는 중".to_string(),
             }
         } else {

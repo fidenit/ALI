@@ -180,3 +180,115 @@ pub fn after(board: &str, cards: &[(String, String, String)]) -> Option<Post> {
     crate::sys::log("jev.log", &format!("뒤 {ms}ms  카드 {}장  불분명={:?}  중요도 {}", cards.len(), post.unclear, imp.join(" ")));
     Some(post)
 }
+
+/// 분류와 주제의 구성을 살핀다. 합칠 만한 주제, 나눌 만한 분류, 겹치는 분류를 짚어서 돌려준다.
+/// 돌려준 것이 있으면 프로그램이 한가할 때 메인 모델에게 "구성 정리"를 시킨다.
+///
+/// `topics` 는 (ID, 이름, 분류 ID(없으면 빈 문자열), 카드 제목들), `groups` 는 (ID, 이름).
+pub fn structure(topics: &[(String, String, String, String)], groups: &[(String, String)]) -> Vec<String> {
+    let mut hints = Vec::new();
+    // 따져 볼 것도 없이 분명한 것들
+    if !groups.is_empty() {
+        for (id, name, group, _) in topics.iter().filter(|t| t.2.is_empty()) {
+            let _ = group;
+            hints.push(format!("주제 {id}({name})가 어느 분류에도 들어 있지 않음"));
+        }
+        if groups.len() == 1 {
+            hints.push("분류가 하나뿐이라 나눈 의미가 없음 (없애거나 둘 이상으로 나눌 것)".to_string());
+        }
+        for (gid, gname) in groups {
+            let n = topics.iter().filter(|t| &t.2 == gid).count();
+            if n == 1 && groups.len() > 2 {
+                hints.push(format!("분류 {gid}({gname})에 주제가 하나뿐임 (다른 분류로 옮기고 없앨지 볼 것)"));
+            }
+        }
+    }
+    if jev::key().is_none() || topics.len() < 2 {
+        return hints;
+    }
+    let mut state = String::from("한 사람이 AI 와 여러 가지 일을 하고 있고, 일마다 '주제'가 하나씩 있다. 주제는 '분류'로 묶여 있다.\n\n");
+    for (gid, gname) in groups {
+        state += &format!("분류 {gname}:\n");
+        for (_, name, _, cards) in topics.iter().filter(|t| &t.2 == gid) {
+            state += &format!("  - 주제 '{name}' (카드: {cards})\n");
+        }
+    }
+    let loose: Vec<_> = topics.iter().filter(|t| t.2.is_empty()).collect();
+    if !loose.is_empty() {
+        state += "분류 없음:\n";
+        for (_, name, _, cards) in &loose {
+            state += &format!("  - 주제 '{name}' (카드: {cards})\n");
+        }
+    }
+    let mut q = Map::new();
+    // 같은 분류 안의 주제 쌍: 사실상 같은 일인가
+    let mut pairs = Vec::new();
+    for i in 0..topics.len() {
+        for j in i + 1..topics.len() {
+            if topics[i].2 == topics[j].2 && pairs.len() < 18 {
+                pairs.push((i, j));
+            }
+        }
+    }
+    for (n, (i, j)) in pairs.iter().enumerate() {
+        q.insert(
+            format!("same{n}"),
+            jev::noul(&format!("주제 '{}'와 주제 '{}'는 같은 일의 일부여서 한 주제로 합치는 것이 낫다", topics[*i].1, topics[*j].1)),
+        );
+    }
+    // 주제가 많이 든 분류: 성격이 다른 두 갈래로 나뉘는가
+    let big: Vec<&(String, String)> = groups.iter().filter(|g| topics.iter().filter(|t| t.2 == g.0).count() >= 4).collect();
+    for (n, (_, gname)) in big.iter().enumerate() {
+        q.insert(format!("split{n}"), jev::noul(&format!("분류 '{gname}'에 든 주제들은 성격이 뚜렷이 다른 두 갈래로 나뉘어서, 분류를 둘로 나누는 것이 낫다")));
+    }
+    // 분류 쌍: 서로 겹치는가
+    let mut gpairs = Vec::new();
+    for i in 0..groups.len() {
+        for j in i + 1..groups.len() {
+            if gpairs.len() < 10 {
+                gpairs.push((i, j));
+            }
+        }
+    }
+    for (n, (i, j)) in gpairs.iter().enumerate() {
+        q.insert(format!("overlap{n}"), jev::noul(&format!("분류 '{}'와 분류 '{}'는 서로 겹쳐서 하나로 합치는 것이 낫다", groups[*i].1, groups[*j].1)));
+    }
+    if q.is_empty() {
+        return hints;
+    }
+    let started = std::time::Instant::now();
+    let a = match jev::decide(&state, Value::Object(q)) {
+        Ok(a) => a,
+        Err(e) => {
+            crate::sys::log("jev.log", &format!("구성 검토 실패: {e}"));
+            return hints;
+        }
+    };
+    let p = |name: String| a.get(&name).and_then(|x| x.value).unwrap_or(0.0);
+    // 기준값을 다듬을 수 있게 확률을 전부 남긴다.
+    let mut seen: Vec<String> = pairs.iter().enumerate().map(|(n, (i, j))| format!("{:.2} 합침 {}+{}", p(format!("same{n}")), topics[*i].1, topics[*j].1)).collect();
+    seen.extend(big.iter().enumerate().map(|(n, g)| format!("{:.2} 나눔 {}", p(format!("split{n}")), g.1)));
+    seen.extend(gpairs.iter().enumerate().map(|(n, (i, j))| format!("{:.2} 겹침 {}+{}", p(format!("overlap{n}")), groups[*i].1, groups[*j].1)));
+    seen.sort_by(|a, b| b.cmp(a));
+    crate::sys::log("jev.log", &format!("구성 확률: {}", seen.join(" | ")));
+    for (n, (i, j)) in pairs.iter().enumerate() {
+        let v = p(format!("same{n}"));
+        if v >= 0.35 {
+            hints.push(format!("주제 {}({})와 {}({})는 같은 일일 수 있음, 합칠지 볼 것 (검토자 확률 {v:.2})", topics[*i].0, topics[*i].1, topics[*j].0, topics[*j].1));
+        }
+    }
+    for (n, (gid, gname)) in big.iter().enumerate() {
+        let v = p(format!("split{n}"));
+        if v >= 0.40 {
+            hints.push(format!("분류 {gid}({gname})는 성격이 다른 두 갈래일 수 있음, 나눌지 볼 것 (검토자 확률 {v:.2})"));
+        }
+    }
+    for (n, (i, j)) in gpairs.iter().enumerate() {
+        let v = p(format!("overlap{n}"));
+        if v >= 0.45 {
+            hints.push(format!("분류 {}({})와 {}({})는 겹칠 수 있음, 합칠지 볼 것 (검토자 확률 {v:.2})", groups[*i].0, groups[*i].1, groups[*j].0, groups[*j].1));
+        }
+    }
+    crate::sys::log("jev.log", &format!("구성 {}ms  주제 {}  분류 {}  짚은 것 {:?}", started.elapsed().as_millis(), topics.len(), groups.len(), hints));
+    hints
+}

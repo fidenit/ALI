@@ -40,6 +40,10 @@ pub fn parse(line: &str) -> Result<Option<Op>, String> {
             let (id, name) = split1(rest);
             Op::Group { id: need(id, "분류 ID")?.into(), name: name.into() }
         }
+        "mv" => {
+            let (card, topic) = split1(rest);
+            Op::Mv { card: need(card, "mv <카드ID> <주제ID>")?.into(), topic: need(topic, "mv <카드ID> <주제ID>")?.into() }
+        }
         "put" => {
             let (topic, group) = split1(rest);
             Op::Put { topic: need(topic, "put <주제ID> <분류ID>")?.into(), group: need(group, "put <주제ID> <분류ID>")?.into() }

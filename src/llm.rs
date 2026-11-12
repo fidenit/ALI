@@ -17,6 +17,8 @@ pub enum Msg {
     Pre(crate::decide::Pre),
     /// 판단 모델이 화면을 검토한 결과
     Review(crate::decide::Post),
+    /// 판단 모델이 분류·주제의 구성에서 고칠 만한 것을 짚었다
+    Tidy(Vec<String>),
     Done(Stats),
     Error(String),
 }

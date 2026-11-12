@@ -86,6 +86,8 @@ pub enum Op {
     Topic { id: String, name: String },
     /// 분류를 만들거나 이름을 바꾼다
     Group { id: String, name: String },
+    /// 카드를 다른 주제로 옮긴다 (주제를 합칠 때 쓴다)
+    Mv { card: String, topic: String },
     /// 주제를 분류에 넣는다
     Put { topic: String, group: String },
     Card { id: String, kind: String, topic: String, size: Option<(u8, u8)>, title: String },
@@ -213,6 +215,16 @@ impl Board {
                         self.groups.push(Group { id, name });
                     }
                 }
+            }
+            Op::Mv { card, topic } => {
+                if !self.topics.iter().any(|t| t.id == topic) {
+                    return Err(format!("주제 '{topic}' 없음"));
+                }
+                let c = self.card_mut(&card)?;
+                c.topic = topic;
+                c.grid = None; // 새 주제 구역에서 자리를 다시 잡는다
+                c.pinned = false;
+                c.rev += 1;
             }
             Op::Put { topic, group } => {
                 if !self.groups.iter().any(|g| g.id == group) {
