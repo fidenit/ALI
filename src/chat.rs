@@ -104,7 +104,7 @@ impl App {
                             self.shelf_row(ui);
                             self.input_box(ui, ctx);
                             self.pics_row(ui);
-                            if self.cfg.key.is_none() && std::env::var("LYBOARD_DEMO").is_err() {
+                            if self.cfg.demo() && std::env::var("LYBOARD_DEMO").is_err() {
                                 self.demo_row(ui);
                             }
                             ui.add_space(8.0);
@@ -597,8 +597,8 @@ impl App {
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(crate::sys::tr(
-                    "ALI는 Claude로 움직입니다. 본인의 Claude API 키를 넣으면 바로 시작합니다.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고, Anthropic 말고는 어디로도 보내지지 않습니다.",
-                    "ALI runs on Claude. Enter your own Claude API key to start.\nThe key is saved only to key.txt in this program's folder and is sent nowhere except Anthropic.",
+                    "ALI는 Claude로 움직입니다. 본인의 Claude API 키를 쓰거나, 이 컴퓨터에 깔린 Claude Code에 맡길 수 있습니다.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고, Anthropic 말고는 어디로도 보내지지 않습니다.",
+                    "ALI runs on Claude. Use your own Claude API key, or the Claude Code installed on this computer.\nThe key is saved only to key.txt in this program's folder and is sent nowhere except Anthropic.",
                 ))
                 .size(12.5)
                 .color(ui::DIM()),
@@ -617,6 +617,46 @@ impl App {
                     )
                 });
             };
+            // 엔진: Claude API 를 직접 부를지, 이 컴퓨터의 Claude Code 에 맡길지.
+            let cc_version = crate::cc::version();
+            let pick_cc = *self.engine_pick.get_or_insert(self.cfg.cc);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let half = (ui.available_width() - 8.0) / 2.0;
+                let choice = |ui: &mut egui::Ui, on: bool, title: &str, sub: &str, enabled: bool| -> bool {
+                    let (r, p) = ui.allocate_painter(egui::vec2(half, 52.0), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+                    p.rect_filled(r.rect, 14.0, if on { ui::ORANGE().gamma_multiply(0.14) } else { FIELD() });
+                    p.rect_stroke(r.rect, 14.0, egui::Stroke::new(if on { 1.5 } else { 1.0 }, if on { ui::ORANGE() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+                    p.text(r.rect.left_top() + egui::vec2(14.0, 17.0), egui::Align2::LEFT_CENTER, title, ui::bold(13.0), if enabled { ui::TEXT() } else { ui::FAINT() });
+                    p.text(r.rect.left_top() + egui::vec2(14.0, 36.0), egui::Align2::LEFT_CENTER, sub, ui::font(11.0), ui::FAINT());
+                    enabled && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+                };
+                if choice(ui, !pick_cc, crate::sys::tr("Claude API 키", "Claude API key"), crate::sys::tr("ALI가 직접 호출 · 쓴 만큼 과금", "ALI calls the API · pay per use"), true) {
+                    self.engine_pick = Some(false);
+                }
+                let sub = match &cc_version {
+                    Some(v) => format!("{} {v}", crate::sys::tr("설치됨", "installed")),
+                    None => crate::sys::tr("이 컴퓨터에 없음", "not found on this computer").to_string(),
+                };
+                if choice(ui, pick_cc, "Claude Code", &sub, cc_version.is_some()) {
+                    self.engine_pick = Some(true);
+                }
+            });
+            let pick_cc = self.engine_pick.unwrap_or(false) && cc_version.is_some();
+            ui.add_space(12.0);
+            if pick_cc {
+                ui.label(
+                    egui::RichText::new(crate::sys::tr(
+                        "이 컴퓨터의 Claude Code에 맡깁니다. Claude Code의 로그인, CLAUDE.md, 스킬, 훅, MCP 서버, 권한 설정이 그대로 적용됩니다. API 키는 필요 없습니다.
+이 방식에서는 ALI 자체 도구(경로 지도, 작업자, 기억 정리)를 아직 쓸 수 없고, Claude Code의 도구가 대신합니다.",
+                        "ALI hands each turn to the Claude Code on this computer. Its login, CLAUDE.md, skills, hooks, MCP servers and permission settings all apply. No API key is needed.
+In this mode ALI's own tools (route maps, workers, memory keeping) are not available yet; Claude Code's tools take their place.",
+                    ))
+                    .size(12.0)
+                    .color(ui::DIM()),
+                );
+                ui.add_space(14.0);
+            }
             let caption = |ui: &mut egui::Ui, name: &str, state: &str, good: bool| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(name).font(ui::bold(12.5)).color(ui::TEXT()));
@@ -624,6 +664,7 @@ impl App {
                 });
                 ui.add_space(4.0);
             };
+            if !pick_cc {
             caption(ui, crate::sys::tr("Claude API 키", "Claude API key"), if has_key { crate::sys::tr("저장됨", "saved") } else { crate::sys::tr("필수", "required") }, has_key);
             field(ui, &mut self.key_input, if has_key { crate::sys::tr("비워 두면 지금 키를 그대로 씁니다", "Leave empty to keep the current key") } else { "sk-ant-…" });
             ui.add_space(6.0);
@@ -632,6 +673,7 @@ impl App {
                 ctx.open_url(egui::OpenUrl::new_tab("https://console.anthropic.com/settings/keys"));
             }
             ui.add_space(14.0);
+            }
             caption(ui, crate::sys::tr("TypeSafe Jev 키", "TypeSafe Jev key"), if has_jev { crate::sys::tr("저장됨", "saved") } else { crate::sys::tr("선택", "optional") }, has_jev);
             field(ui, &mut self.jev_input, if has_jev { crate::sys::tr("비워 두면 지금 키를 그대로 씁니다", "Leave empty to keep the current key") } else { crate::sys::tr("없어도 됩니다", "Not needed to start") });
             ui.add_space(6.0);
@@ -644,7 +686,8 @@ impl App {
                 .color(ui::FAINT()),
             );
             ui.add_space(16.0);
-            let ready = self.key_input.trim().len() > 20 || (has_key && self.jev_input.trim().len() > 8);
+            let ready = if pick_cc { pick_cc != self.cfg.cc || self.jev_input.trim().len() > 8 } else { self.key_input.trim().len() > 20 || (has_key && (self.jev_input.trim().len() > 8 || self.cfg.cc)) };
+            let has_key = has_key || self.cfg.cc;
             let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 42.0), egui::Sense::click());
             p.rect_filled(r.rect, 21.0, if ready { ui::TEXT() } else { FIELD() });
             p.text(r.rect.center(), egui::Align2::CENTER_CENTER, if has_key { crate::sys::tr("저장", "Save") } else { crate::sys::tr("저장하고 시작", "Save and start") }, ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
@@ -665,7 +708,8 @@ impl App {
         });
         if save {
             let base = sys::base_dir();
-            let was_demo = self.cfg.key.is_none();
+            let was_demo = self.cfg.demo();
+            let _ = std::fs::write(base.join("engine.txt"), if self.engine_pick == Some(true) && crate::cc::version().is_some() { "claude-code" } else { "api" });
             if !self.key_input.trim().is_empty() {
                 let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
             }
@@ -676,15 +720,17 @@ impl App {
             self.jev_input.clear();
             self.cfg = llm::Config::load();
             // 데모에서 넘어올 때만 화면을 비우고 실제 모드로 들어간다. 키만 바꾼 경우에는 하던 일을 그대로 둔다.
-            if was_demo && self.cfg.key.is_some() {
+            if was_demo && !self.cfg.demo() {
                 self.recent.clear();
                 self.view = ui::View::default();
                 self.start_real_mode();
             }
             self.key_popup = false;
+            self.engine_pick = None;
         }
         if close {
             self.key_popup = false;
+            self.engine_pick = None;
         }
     }
 }

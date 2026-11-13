@@ -43,6 +43,9 @@ pub struct Stats {
     pub output_tokens: u64,
     pub first_ms: u64,
     pub total_ms: u64,
+    /// Claude Code 엔진: 이 턴의 비용(달러 환산)과 걸려 있는 사용 한도의 종류
+    pub cost_usd: f64,
+    pub limit: String,
 }
 
 #[derive(Clone)]
@@ -50,6 +53,8 @@ pub struct Config {
     pub key: Option<String>,
     pub model: String,
     pub effort: String,
+    /// Claude Code 엔진을 쓰는가 (API 를 직접 부르지 않고 이 컴퓨터의 Claude Code 에 맡긴다)
+    pub cc: bool,
 }
 
 impl Config {
@@ -60,7 +65,11 @@ impl Config {
         });
         // LYBOARD_DEMO 가 있으면 키가 있어도 시연 대본으로 돈다 (화면 확인용, API 비용 없음).
         let key = if env("LYBOARD_DEMO").is_some() { None } else { key };
+        // 엔진: 프로그램 폴더의 engine.txt 에 claude-code 라고 적혀 있으면 Claude Code 에 맡긴다.
+        let engine = env("LYBOARD_ENGINE").or_else(|| std::fs::read_to_string(crate::sys::base_dir().join("engine.txt")).ok().map(|s| s.trim().to_string()));
+        let cc = engine.as_deref() == Some("claude-code") && env("LYBOARD_DEMO").is_none();
         Config {
+            cc,
             key,
             model: env("LYBOARD_MODEL").unwrap_or_else(|| "claude-opus-5-5".into()),
             // 화면 반응 속도가 중요해서 기본은 low. 형태 선택 품질이 아쉬우면 medium 으로 올린다.
@@ -68,7 +77,7 @@ impl Config {
         }
     }
     pub fn demo(&self) -> bool {
-        self.key.is_none()
+        self.key.is_none() && !self.cc
     }
 }
 
@@ -129,6 +138,7 @@ pub fn run_turn(cfg: Config, turn_text: String, images: Vec<(String, String)>, q
             }
         }
         let result = match &cfg.key {
+            _ if cfg.cc => crate::cc::run(&cfg.effort, &turn_text, &images, &stop, &send),
             Some(key) => {
                 // 답하는 중에 사용자가 더 적은 말: 도구를 쓰는 사이사이에 꺼내서 모델에게 전한다.
                 let added = || {

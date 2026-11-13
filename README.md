@@ -48,6 +48,8 @@ Nothing like it existed, so we built it. We hope it makes working with AI less t
 
 You can look around without anything: with no key, ALI opens in a demo that plays prepared scenes and says so on screen. To really use it you need a [Claude API key](https://console.anthropic.com/settings/keys). Usage is billed to your own account. The key can also come from the `ANTHROPIC_API_KEY` environment variable.
 
+**Or use Claude Code as the engine.** If [Claude Code](https://claude.com/claude-code) is installed, choose it in the same window and ALI hands each turn to it instead of calling the API. Your Claude Code login, `CLAUDE.md`, skills, hooks, MCP servers and permission settings all apply, and no API key is needed. ALI's own tools (route maps, workers, memory keeping) are not available in this mode yet. Extra options for Claude Code, such as `--permission-mode acceptEdits` or `--model sonnet`, go in `claude-args.txt` in the program folder.
+
 A second key is optional: a [TypeSafe AI](https://typesafe.ai) Jev key. Jev is a small, fast model that only makes decisions. With it, ALI picks the topic before answering, puts important cards first, tidies overlapping topics, and recalls only the past conversations that matter. Without it, ALI works the same. Both keys can be entered or changed any time from **Keys** at the bottom left (or `TYPESAFE_API_KEY`).
 
 **Windows.** Download the zip from [Releases](https://github.com/fidenit/ALI/releases), unpack it and run `ali.exe`. There is no installer. On first start a window asks for your key; you can skip it and stay in the demo.

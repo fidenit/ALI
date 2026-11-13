@@ -1,6 +1,7 @@
 ﻿#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod agent;
+mod cc;
 mod audio;
 mod chat;
 mod core;
@@ -80,6 +81,8 @@ struct App {
     jev_input: String,
     /// 키를 넣는 창이 떠 있는가 (키 없이 처음 켰을 때 뜬다)
     key_popup: bool,
+    /// 키 창에서 고른 엔진 (true = Claude Code). 창을 열 때 지금 설정으로 맞춘다.
+    engine_pick: Option<bool>,
     /// 화면 조작에 AI 가 반응할 예정 시각
     react_at: Option<std::time::Instant>,
     /// 사용자가 조작했고 AI 의 반응을 기다리는 카드
@@ -428,6 +431,7 @@ impl App {
             key_input: String::new(),
             jev_input: String::new(),
             key_popup: false,
+            engine_pick: None,
             react_at: None,
             pending: Default::default(),
             recent: Vec::new(),
@@ -537,7 +541,7 @@ impl App {
             });
         }
         // 시연 모드는 매번 빈 보드에서 시작한다. 실제 모드는 조작 기록을 재생해 보드를 되살린다.
-        app.key_popup = app.cfg.key.is_none() && std::env::var("LYBOARD_DEMO").is_err() && std::env::var("LYBOARD_NO_KEY_WINDOW").is_err();
+        app.key_popup = app.cfg.demo() && std::env::var("LYBOARD_DEMO").is_err() && std::env::var("LYBOARD_NO_KEY_WINDOW").is_err();
         if !app.cfg.demo() {
             if std::env::args().any(|a| a == "--fresh") {
                 let _ = std::fs::remove_file(log_path());
@@ -1826,6 +1830,12 @@ impl App {
         if let Some(s) = self.stats.as_ref().filter(|_| self.promo.is_none()) {
             parts.push(s.model.clone());
             parts.push(if sys::english() { format!("first {:.1}s · total {:.1}s", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0) } else { format!("첫 반응 {:.1}초 · 전체 {:.1}초", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0) });
+            if s.cost_usd > 0.0 {
+                parts.push(format!("${:.3}", s.cost_usd));
+            }
+            if !s.limit.is_empty() {
+                parts.push(format!("{} {}", sys::tr("한도", "limit"), s.limit));
+            }
             if s.input_tokens > 0 {
                 parts.push(if sys::english() { format!("in {} (cached {}) · out {} tokens", s.input_tokens, s.cached_tokens, s.output_tokens) } else { format!("입력 {} (캐시 {}) · 출력 {} 토큰", s.input_tokens, s.cached_tokens, s.output_tokens) });
             }

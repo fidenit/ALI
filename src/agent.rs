@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use crate::llm::{Config, Msg, Stats};
 
 /// 지시문. 부품 표는 등록된 부품 목록에서 만들어 끼워 넣는다 (프로그램이 떠 있는 동안 한 번만 만든다: 바뀌면 캐시가 깨진다).
-fn system() -> &'static str {
+pub fn system() -> &'static str {
     static BUILT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     BUILT.get_or_init(|| include_str!("prompt.md").replace("{{PARTS}}", crate::core::parts_table().trim_end()))
 }
