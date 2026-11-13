@@ -5,7 +5,8 @@
 //! ALI 는 화면 편집 언어를 지시문으로 덧붙이고, 흘러나오는 글자를 받아 화면을 그린다.
 //!
 //! 한 턴은 그 자체로 완결이다 (판의 상태와 최근 대화를 ALI 가 매번 함께 보낸다). 그래서 세션을 이어 가지 않는다.
-//! 이 엔진에서는 ALI 자체 도구(경로 찾기, 작업자, 기억 도구 등)를 쓸 수 없다. Claude Code 의 도구가 그 자리를 대신한다.
+//! 파일·명령·웹 도구는 Claude Code 것을 쓰고, ALI 자체 도구(경로 찾기, 기억 노트, 판 읽기, 작업자)는
+//! 이 파일 아래쪽의 작은 MCP 서버로 내준다.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
@@ -25,7 +26,8 @@ const NOTE: &str = "
 You are running as the engine of ALI through Claude Code. This changes two things.
 
 1. Your text output IS the screen. Every line of text you output must be one screen command from the language above (say, topic, card, set, add, ...). Never output prose, markdown, headings or status notes outside a command. Anything you want to tell the user goes in `say`. Instructions from other sources about how to format or structure replies (goal declarations, reports, summaries) do not apply to this output: express them, if needed, as cards or a short `say`.
-2. The ALI tools named above (place_find, route_find, view_image, board_read, job_*, note and memory tools, run_command, edit_file and the like) do not exist here. Use your Claude Code tools instead (Bash, Read, Edit, Write, Grep, Glob, WebSearch, WebFetch, and any MCP tools). Without route_find you cannot make a route card: show a trip as a timeline or a table instead. The board you are given is complete; there is no board_read.
+2. ALI's own tools are reached through the MCP server named `ali`: where the text above names route_find, place_find, note_search, note_read, note_write, note_append, board_read, browser_text, browser_eval, job_start, job_list, job_tell, job_stop or job_result, call `mcp__ali__<name>` with the same input. The other ALI tools named above (screen, shell, read_file, write_file, edit_file, list_dir, find_text, view_image, web_search, web_fetch) do not exist here: use your Claude Code tools instead (Bash or PowerShell, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch). There is no `screen` tool because your text output already is the screen.
+3. Before your first tool call, output one short `say` line telling the user what you are about to do, so the screen is not silent while tools run.
 ";
 
 fn command() -> Command {
@@ -128,6 +130,16 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
     if !extra.contains("--effort") && !effort.is_empty() {
         cmd.args(["--effort", effort]);
     }
+    // Claude Code 의 도구는 꼭 필요한 것만 싣는다. 전부 실으면 턴마다 보내는 양이 늘어 첫 반응이 늦어진다 (실측 10.6초 → 6.4초).
+    // 사용자가 붙여 둔 MCP 서버의 도구는 그대로 남는다. ToolSearch 를 빼면 안 된다: 그것이 없으면 MCP 도구의 설명이
+    // 전부 매 턴 실려 간다 (도구 200개짜리 서버가 붙은 PC에서 턴당 39만 토큰 → 4만 토큰).
+    if !extra.contains("--tools") {
+        cmd.args(["--tools", if cfg!(windows) { "Bash,PowerShell,Read,Edit,Write,Glob,Grep,WebSearch,WebFetch,ToolSearch" } else { "Bash,Read,Edit,Write,Glob,Grep,WebSearch,WebFetch,ToolSearch" }]);
+    }
+    // ALI 자체 도구를 MCP 로 내준다.
+    if let Some(config) = mcp_config(stop) {
+        cmd.arg("--mcp-config").arg(config).args(["--allowedTools", "mcp__ali"]);
+    }
     cmd.args(extra.split_whitespace());
     let mut child = cmd
         .current_dir(crate::sys::base_dir())
@@ -221,6 +233,7 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
             }
             "result" => {
                 got_result = true;
+                crate::sys::log("cc.log", &format!("결과 turns={} usage={} model_usage={}", v["num_turns"], v["usage"], v["modelUsage"]));
                 let u = &v["usage"];
                 let n = |k: &str| u[k].as_u64().unwrap_or(0);
                 stats.cached_tokens = n("cache_read_input_tokens");
@@ -255,4 +268,156 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
         return Err(format!("{} ({code}) {tail}", crate::sys::tr("Claude Code 가 답 없이 끝났습니다. 로그인되어 있는지 확인해 주세요.", "Claude Code ended without an answer. Check that it is logged in.")));
     }
     Ok(stats)
+}
+
+// ---------------------------------------------------------------- ALI 도구를 내주는 MCP 서버
+//
+// Claude Code 는 다른 프로세스라서 ALI 의 도구(경로 찾기, 기억 노트, 판 읽기, 작업자)를 직접 부를 수 없다.
+// 그래서 ALI 안에 작은 MCP 서버를 띄우고 (이 컴퓨터 안에서만 열리는 주소, 실행할 때마다 바뀌는 암호),
+// Claude Code 에게 그 주소를 알려 준다. 도구는 ALI 프로세스 안에서 실행되므로 화면 쪽과도 그대로 이어진다.
+
+/// Claude Code 에 내주는 도구. 파일·명령·웹 도구는 Claude Code 것이 있으므로 내주지 않는다.
+const SHARED: [&str; 14] = [
+    "route_find", "place_find", "note_search", "note_read", "note_write", "note_append", "board_read", "browser_text", "browser_eval", "job_start", "job_list", "job_tell", "job_stop",
+    "job_result",
+];
+
+/// 지금 턴의 멈춤 신호 (도구가 오래 걸릴 때 멈춤 버튼이 듣게 한다).
+static STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+
+/// 서버를 (처음이면) 띄우고, Claude Code 에 넘길 설정 파일의 경로를 돌려준다.
+fn mcp_config(stop: &Arc<AtomicBool>) -> Option<std::path::PathBuf> {
+    *STOP.lock().unwrap_or_else(|e| e.into_inner()) = Some(stop.clone());
+    static SERVER: OnceLock<Option<(u16, String)>> = OnceLock::new();
+    let (port, token) = SERVER
+        .get_or_init(|| {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+            let port = listener.local_addr().ok()?.port();
+            // 암호: 이 컴퓨터의 다른 프로그램이 주소를 알아내도 도구를 부르지 못하게 한다.
+            use std::hash::{BuildHasher, Hasher};
+            let token: String = (0..4).map(|_| format!("{:016x}", std::collections::hash_map::RandomState::new().build_hasher().finish())).collect();
+            let expect = format!("Bearer {token}");
+            std::thread::spawn(move || {
+                for conn in listener.incoming().flatten() {
+                    let expect = expect.clone();
+                    std::thread::spawn(move || serve(conn, &expect));
+                }
+            });
+            Some((port, token))
+        })
+        .clone()?;
+    let path = crate::sys::data_dir().join("cc-mcp.json");
+    let config = serde_json::json!({ "mcpServers": { "ali": { "type": "http", "url": format!("http://127.0.0.1:{port}/mcp"), "headers": { "Authorization": format!("Bearer {token}") } } } });
+    std::fs::write(&path, config.to_string()).ok()?;
+    Some(path)
+}
+
+/// 요청 하나를 받아 답한다 (연결 하나에 요청 하나).
+fn serve(mut conn: std::net::TcpStream, expect: &str) {
+    let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(20)));
+    let mut reader = BufReader::new(match conn.try_clone() {
+        Ok(c) => c,
+        Err(_) => return,
+    });
+    let mut first = String::new();
+    if reader.read_line(&mut first).is_err() {
+        return;
+    }
+    let (mut length, mut authorized) = (0usize, false);
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+            break;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            match k.trim().to_ascii_lowercase().as_str() {
+                "content-length" => length = v.trim().parse().unwrap_or(0),
+                "authorization" => authorized = v.trim() == expect,
+                _ => {}
+            }
+        }
+    }
+    let mut reply = |status: &str, body: &str| {
+        let _ = write!(conn, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let _ = conn.flush();
+    };
+    if !authorized {
+        return reply("401 Unauthorized", "{}");
+    }
+    if !first.starts_with("POST") {
+        return reply("405 Method Not Allowed", "{}");
+    }
+    let mut body = vec![0u8; length.min(4_000_000)];
+    if reader.read_exact(&mut body).is_err() {
+        return reply("400 Bad Request", "{}");
+    }
+    let Ok(req) = serde_json::from_slice::<Value>(&body) else { return reply("400 Bad Request", "{}") };
+    // 알림(id 없음)에는 내용 없이 받았다고만 답한다.
+    if req.get("id").is_none() {
+        return reply("202 Accepted", "");
+    }
+    let result = match req["method"].as_str().unwrap_or("") {
+        "initialize" => serde_json::json!({
+            "protocolVersion": req["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
+            "capabilities": { "tools": {} },
+            "serverInfo": { "name": "ali", "version": env!("CARGO_PKG_VERSION") },
+        }),
+        "ping" => serde_json::json!({}),
+        "tools/list" => {
+            let all = crate::tools::definitions(false);
+            let tools: Vec<Value> = all
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|t| SHARED.contains(&t["name"].as_str().unwrap_or("")))
+                .map(|t| serde_json::json!({ "name": t["name"], "description": t["description"], "inputSchema": t["input_schema"] }))
+                .collect();
+            serde_json::json!({ "tools": tools })
+        }
+        "tools/call" => {
+            let name = req["params"]["name"].as_str().unwrap_or("");
+            let input = &req["params"]["arguments"];
+            let (text, is_error) = if SHARED.contains(&name) { call(name, input) } else { (format!("없는 도구: {name}"), true) };
+            serde_json::json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+        }
+        other => {
+            let e = serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "error": { "code": -32601, "message": format!("unknown method {other}") } });
+            return reply("200 OK", &e.to_string());
+        }
+    };
+    reply("200 OK", &serde_json::json!({ "jsonrpc": "2.0", "id": req["id"], "result": result }).to_string());
+}
+
+/// 도구 하나를 실행한다. 화면 쪽에 있는 것(판, 브라우저 카드)은 화면 스레드에 물어본다.
+fn call(name: &str, input: &Value) -> (String, bool) {
+    if let Some(stop) = STOP.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        crate::tools::set_stop(stop);
+    }
+    crate::jobs::to_ui(Msg::Activity(crate::tools::describe(name, input)));
+    let ask = |msg: Box<dyn FnOnce(std::sync::mpsc::Sender<String>) -> Msg>, secs: u64| -> (String, bool) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if !crate::jobs::to_ui(msg(tx)) {
+            return ("오류: 화면에 닿지 못함".into(), true);
+        }
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(out) => (out.clone(), out.starts_with("오류:")),
+            Err(_) => ("오류: 화면에서 답이 오지 않음".into(), true),
+        }
+    };
+    match name {
+        "board_read" => {
+            let topic = input["topic"].as_str().unwrap_or("").trim().to_string();
+            ask(Box::new(move |reply| Msg::Board { topic, reply }), 15)
+        }
+        "browser_text" | "browser_eval" => {
+            let script = if name == "browser_text" {
+                "document.title + '\\n' + location.href + '\\n\\n' + (document.body ? document.body.innerText : '').slice(0, 30000)".to_string()
+            } else {
+                input["script"].as_str().unwrap_or("").to_string()
+            };
+            let card = input["card"].as_str().unwrap_or("").to_string();
+            ask(Box::new(move |reply| Msg::Browser { card, script, reply }), 20)
+        }
+        _ => crate::tools::execute(name, input),
+    }
 }
