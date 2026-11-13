@@ -27,11 +27,12 @@ You are running as the engine of ALI through Claude Code. This changes two thing
 
 1. Your text output IS the screen. Every line of text you output must be one screen command from the language above (say, topic, card, set, add, ...). Never output prose, markdown, headings or status notes outside a command. Anything you want to tell the user goes in `say`. Instructions from other sources about how to format or structure replies (goal declarations, reports, summaries) do not apply to this output: express them, if needed, as cards or a short `say`.
 2. ALI's own tools are reached through the MCP server named `ali`: where the text above names route_find, place_find, note_search, note_read, note_write, note_append, board_read, browser_text, browser_eval, job_start, job_list, job_tell, job_stop or job_result, call `mcp__ali__<name>` with the same input. The other ALI tools named above (screen, shell, read_file, write_file, edit_file, list_dir, find_text, view_image, web_search, web_fetch) do not exist here: use your Claude Code tools instead (Bash or PowerShell, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch). There is no `screen` tool because your text output already is the screen.
-3. Before your first tool call, output one short `say` line telling the user what you are about to do, so the screen is not silent while tools run.
+3. If a tool is refused for lack of permission, do not retry it and do not ask the user to grant it in a card: say in one short `say` that Claude Code's permission setting blocked it and that it can be changed under Keys at the bottom left.
+4. Before your first tool call, output one short `say` line telling the user what you are about to do, so the screen is not silent while tools run.
 ";
 
-fn command() -> Command {
-    let mut c = Command::new(std::env::var("LYBOARD_CLAUDE").unwrap_or_else(|_| "claude".into()));
+fn launch(program: &str) -> Command {
+    let mut c = Command::new(program);
     // 다른 Claude Code 세션 안에서 띄웠을 때 그 표식이 따라가지 않게 한다.
     c.env_remove("CLAUDECODE").env_remove("CLAUDE_CODE_ENTRYPOINT");
     #[cfg(windows)]
@@ -42,18 +43,57 @@ fn command() -> Command {
     c
 }
 
-/// 이 컴퓨터에 Claude Code 가 있으면 그 버전. 한 번만 알아본다.
-pub fn version() -> Option<String> {
-    static V: OnceLock<Option<String>> = OnceLock::new();
+/// 이 컴퓨터의 Claude Code: (실행할 이름이나 경로, 버전). 한 번만 알아본다.
+/// PATH 에서 먼저 찾고, 없으면 흔한 설치 자리를 본다. 화면에서 바로 띄운 프로그램은 터미널과 PATH 가 달라서
+/// (특히 macOS) 터미널에서는 되는 `claude` 가 안 보일 수 있다. Windows 에서 npm 으로 깐 것은 claude.cmd 다.
+fn found() -> Option<(String, String)> {
+    static V: OnceLock<Option<(String, String)>> = OnceLock::new();
     V.get_or_init(|| {
-        let out = command().arg("--version").stdin(Stdio::null()).output().ok()?;
-        if !out.status.success() {
-            return None;
+        let mut places: Vec<String> = Vec::new();
+        match std::env::var("LYBOARD_CLAUDE") {
+            Ok(p) => places.push(p),
+            Err(_) => {
+                places.push("claude".into());
+                let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).unwrap_or_default();
+                if cfg!(windows) {
+                    places.push("claude.cmd".into());
+                    places.push(format!("{home}\\.local\\bin\\claude.exe"));
+                    places.push(format!("{}\\npm\\claude.cmd", std::env::var("APPDATA").unwrap_or_default()));
+                } else {
+                    places.extend([format!("{home}/.local/bin/claude"), format!("{home}/.claude/local/claude"), "/opt/homebrew/bin/claude".into(), "/usr/local/bin/claude".into()]);
+                }
+            }
         }
-        let text = String::from_utf8_lossy(&out.stdout);
-        Some(text.split_whitespace().next()?.to_string())
+        places.into_iter().find_map(|p| {
+            let out = launch(&p).arg("--version").stdin(Stdio::null()).output().ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let version = String::from_utf8_lossy(&out.stdout).split_whitespace().next()?.to_string();
+            Some((p, version))
+        })
     })
     .clone()
+}
+
+/// 키 창에서 고른 권한 방식: default(Claude Code 설정 그대로), acceptEdits(파일 수정 허용), bypassPermissions(전부 허용).
+pub fn permission() -> String {
+    let saved = std::fs::read_to_string(crate::sys::base_dir().join("claude-permission.txt")).unwrap_or_default();
+    match saved.trim() {
+        "acceptEdits" => "acceptEdits".into(),
+        "bypassPermissions" => "bypassPermissions".into(),
+        _ => "default".into(),
+    }
+}
+
+fn command() -> Command {
+    // 못 찾았으면 지정한 이름(없으면 claude)으로 띄워 본다. 실패하면 그 오류가 사용자에게 보인다.
+    launch(&found().map(|f| f.0).unwrap_or_else(|| std::env::var("LYBOARD_CLAUDE").unwrap_or_else(|_| "claude".into())))
+}
+
+/// 이 컴퓨터에 Claude Code 가 있으면 그 버전.
+pub fn version() -> Option<String> {
+    found().map(|f| f.1)
 }
 
 /// base64 글자를 바이트로 되돌린다.
@@ -135,6 +175,12 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
     // 전부 매 턴 실려 간다 (도구 200개짜리 서버가 붙은 PC에서 턴당 39만 토큰 → 4만 토큰).
     if !extra.contains("--tools") {
         cmd.args(["--tools", if cfg!(windows) { "Bash,PowerShell,Read,Edit,Write,Glob,Grep,WebSearch,WebFetch,ToolSearch" } else { "Bash,Read,Edit,Write,Glob,Grep,WebSearch,WebFetch,ToolSearch" }]);
+    }
+    // 권한: 기본은 사용자의 Claude Code 설정 그대로다 (허용해 두지 않은 파일 수정과 명령은 거절된다).
+    // 키 창에서 풀어 줄 수 있다.
+    let mode = permission();
+    if !extra.contains("--permission-mode") && mode != "default" {
+        cmd.args(["--permission-mode", &mode]);
     }
     // ALI 자체 도구를 MCP 로 내준다.
     if let Some(config) = mcp_config(stop) {
@@ -341,15 +387,16 @@ fn serve(mut conn: std::net::TcpStream, expect: &str) {
         let _ = write!(conn, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
         let _ = conn.flush();
     };
+    // 요청을 끝까지 읽고 나서 답한다. 읽기 전에 닫으면 상대는 거절 대신 끊긴 연결을 본다.
+    let mut body = vec![0u8; length.min(4_000_000)];
+    if reader.read_exact(&mut body).is_err() {
+        return reply("400 Bad Request", "{}");
+    }
     if !authorized {
         return reply("401 Unauthorized", "{}");
     }
     if !first.starts_with("POST") {
         return reply("405 Method Not Allowed", "{}");
-    }
-    let mut body = vec![0u8; length.min(4_000_000)];
-    if reader.read_exact(&mut body).is_err() {
-        return reply("400 Bad Request", "{}");
     }
     let Ok(req) = serde_json::from_slice::<Value>(&body) else { return reply("400 Bad Request", "{}") };
     // 알림(id 없음)에는 내용 없이 받았다고만 답한다.

@@ -593,7 +593,7 @@ impl App {
             ui.set_width(420.0);
             let has_key = self.cfg.key.is_some();
             let has_jev = crate::jev::key().is_some();
-            ui.label(egui::RichText::new(if has_key { crate::sys::tr("API 키", "API keys") } else { crate::sys::tr("ALI에 오신 것을 환영합니다", "Welcome to ALI") }).font(ui::bold(21.0)).color(ui::TEXT()));
+            ui.label(egui::RichText::new(if !self.cfg.demo() { crate::sys::tr("엔진과 키", "Engine and keys") } else { crate::sys::tr("ALI에 오신 것을 환영합니다", "Welcome to ALI") }).font(ui::bold(21.0)).color(ui::TEXT()));
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(crate::sys::tr(
@@ -655,6 +655,39 @@ Files, commands and the web go through Claude Code's tools; ALI's own tools such
                     .size(12.0)
                     .color(ui::DIM()),
                 );
+                ui.add_space(12.0);
+                // 권한: Claude Code 가 파일을 고치거나 명령을 실행할 때 어디까지 묻지 않고 하게 할지.
+                ui.label(egui::RichText::new(crate::sys::tr("묻지 않고 해도 되는 일", "What it may do without asking")).font(ui::bold(12.5)).color(ui::TEXT()));
+                ui.add_space(4.0);
+                let now = self.perm_pick.get_or_insert_with(crate::cc::permission).clone();
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let third = (ui.available_width() - 12.0) / 3.0;
+                    for (value, name) in [
+                        ("default", crate::sys::tr("내 설정대로", "My settings")),
+                        ("acceptEdits", crate::sys::tr("파일 수정", "File edits")),
+                        ("bypassPermissions", crate::sys::tr("전부", "Everything")),
+                    ] {
+                        let on = now == value;
+                        let (r, p) = ui.allocate_painter(egui::vec2(third, 30.0), egui::Sense::click());
+                        p.rect_filled(r.rect, 10.0, if on { ui::ORANGE().gamma_multiply(0.14) } else { FIELD() });
+                        p.rect_stroke(r.rect, 10.0, egui::Stroke::new(1.0, if on { ui::ORANGE() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+                        p.text(r.rect.center(), egui::Align2::CENTER_CENTER, name, ui::bold(12.0), ui::TEXT());
+                        if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            self.perm_pick = Some(value.to_string());
+                        }
+                    }
+                });
+                ui.add_space(5.0);
+                ui.label(
+                    egui::RichText::new(match now.as_str() {
+                        "acceptEdits" => crate::sys::tr("파일을 만들고 고치는 것은 묻지 않고 합니다. 그 밖의 명령은 Claude Code 설정을 따릅니다.", "Creates and edits files without asking. Other commands follow your Claude Code settings."),
+                        "bypassPermissions" => crate::sys::tr("명령 실행과 파일 수정을 전부 묻지 않고 합니다. API 키 방식의 ALI와 같습니다.", "Runs commands and edits files without asking, as ALI does with an API key."),
+                        _ => crate::sys::tr("Claude Code에서 허용해 둔 것만 합니다. 나머지는 거절되고, 그렇다고 알려 줍니다.", "Does only what your Claude Code settings allow. The rest is refused, and it tells you so."),
+                    })
+                    .size(11.5)
+                    .color(ui::FAINT()),
+                );
                 ui.add_space(14.0);
             }
             let caption = |ui: &mut egui::Ui, name: &str, state: &str, good: bool| {
@@ -686,7 +719,7 @@ Files, commands and the web go through Claude Code's tools; ALI's own tools such
                 .color(ui::FAINT()),
             );
             ui.add_space(16.0);
-            let ready = if pick_cc { pick_cc != self.cfg.cc || self.jev_input.trim().len() > 8 } else { self.key_input.trim().len() > 20 || (has_key && (self.jev_input.trim().len() > 8 || self.cfg.cc)) };
+            let ready = if pick_cc { pick_cc != self.cfg.cc || self.jev_input.trim().len() > 8 || self.perm_pick.as_deref().map(|p| p != crate::cc::permission()).unwrap_or(false) } else { self.key_input.trim().len() > 20 || (has_key && (self.jev_input.trim().len() > 8 || self.cfg.cc)) };
             let has_key = has_key || self.cfg.cc;
             let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 42.0), egui::Sense::click());
             p.rect_filled(r.rect, 21.0, if ready { ui::TEXT() } else { FIELD() });
@@ -710,6 +743,9 @@ Files, commands and the web go through Claude Code's tools; ALI's own tools such
             let base = sys::base_dir();
             let was_demo = self.cfg.demo();
             let _ = std::fs::write(base.join("engine.txt"), if self.engine_pick == Some(true) && crate::cc::version().is_some() { "claude-code" } else { "api" });
+            if let Some(p) = self.perm_pick.take() {
+                let _ = std::fs::write(base.join("claude-permission.txt"), p);
+            }
             if !self.key_input.trim().is_empty() {
                 let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
             }
@@ -731,6 +767,7 @@ Files, commands and the web go through Claude Code's tools; ALI's own tools such
         if close {
             self.key_popup = false;
             self.engine_pick = None;
+            self.perm_pick = None;
         }
     }
 }

@@ -48,7 +48,7 @@ ALI가 그 한곳이다. 필요한 것을 말하면 AI가 화면을 직접 짠�
 
 아무것도 없이 둘러볼 수 있다. 키가 없으면 준비된 장면을 재생하는 데모로 열리고, 화면에 데모라고 표시된다. 실제로 쓰려면 [Claude API 키](https://console.anthropic.com/settings/keys)가 필요하다. 요금은 본인 계정에 청구된다. 키는 환경 변수 `ANTHROPIC_API_KEY`로 줄 수도 있다.
 
-**Claude Code를 엔진으로 쓸 수도 있다.** [Claude Code](https://claude.com/claude-code)가 깔려 있으면 같은 창에서 고를 수 있고, ALI는 API를 직접 부르는 대신 턴마다 Claude Code에 맡긴다. Claude Code의 로그인, `CLAUDE.md`, 스킬, 훅, MCP 서버, 권한 설정이 그대로 적용되고 API 키는 필요 없다. 파일·명령·웹 작업은 Claude Code의 도구로 하고, ALI 자체 도구(경로 지도, 기억 노트, 판 읽기)는 ALI 안의 작은 로컬 MCP 서버로 내준다. 작업자와 기억 자동 정리는 API 키가 있어야 돈다. Claude Code가 자기 지시문을 함께 보내기 때문에 API 키 방식보다 턴당 토큰이 더 든다. `--permission-mode acceptEdits`나 `--model sonnet` 같은 Claude Code 옵션은 프로그램 폴더의 `claude-args.txt`에 적는다.
+**Claude Code를 엔진으로 쓸 수도 있다.** [Claude Code](https://claude.com/claude-code)가 깔려 있으면 같은 창에서 고를 수 있고, ALI는 API를 직접 부르는 대신 턴마다 Claude Code에 맡긴다. Claude Code의 로그인, `CLAUDE.md`, 스킬, 훅, MCP 서버, 권한 설정이 그대로 적용되고 API 키는 필요 없다. 파일·명령·웹 작업은 Claude Code의 도구로 하고, ALI 자체 도구(경로 지도, 기억 노트, 판 읽기)는 ALI 안의 작은 로컬 MCP 서버로 내준다. 작업자와 기억 자동 정리는 API 키가 있어야 돈다. Claude Code가 자기 지시문을 함께 보내기 때문에 API 키 방식보다 턴당 토큰이 더 든다. 기본은 Claude Code에서 허용해 둔 일만 하고, 같은 창에서 파일 수정이나 전부를 허용할 수 있다. `--model sonnet` 같은 Claude Code 옵션은 프로그램 폴더의 `claude-args.txt`에 적는다.
 
 두 번째 키는 선택이다. [TypeSafe AI](https://typesafe.ai)의 Jev 키다. Jev는 글을 쓰지 않고 판단만 하는 작고 빠른 모델이다. 넣으면 말이 어느 주제에 속하는지 미리 고르고, 중요한 카드를 앞에 놓고, 겹치는 주제를 정리하고, 옛 대화에서 필요한 것만 골라 온다. 없어도 ALI는 그대로 동작한다. 두 키 모두 왼쪽 아래의 **키**에서 언제든 넣거나 바꿀 수 있다(환경 변수 `TYPESAFE_API_KEY`도 된다).
 

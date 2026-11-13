@@ -83,6 +83,8 @@ struct App {
     key_popup: bool,
     /// 키 창에서 고른 엔진 (true = Claude Code). 창을 열 때 지금 설정으로 맞춘다.
     engine_pick: Option<bool>,
+    /// 키 창에서 고른 Claude Code 권한 방식
+    perm_pick: Option<String>,
     /// 화면 조작에 AI 가 반응할 예정 시각
     react_at: Option<std::time::Instant>,
     /// 사용자가 조작했고 AI 의 반응을 기다리는 카드
@@ -432,6 +434,7 @@ impl App {
             jev_input: String::new(),
             key_popup: false,
             engine_pick: None,
+            perm_pick: None,
             react_at: None,
             pending: Default::default(),
             recent: Vec::new(),
@@ -1995,8 +1998,14 @@ impl eframe::App for App {
         if !self.autoplay.is_empty() {
             // "+" 로 시작하는 입력은 앞의 턴이 도는 도중(시작 4초 뒤)에 넣는다: 답하는 중에 더 말하는 것을 시험한다.
             if self.busy && self.autoplay.front().map(|n| n.starts_with('+')).unwrap_or(false) && self.sent_at.elapsed().as_millis() > 4000 {
-                self.input = self.autoplay.pop_front().unwrap_or_default().trim_start_matches('+').to_string();
-                self.send(&ctx);
+                let said = self.autoplay.pop_front().unwrap_or_default().trim_start_matches('+').to_string();
+                if said == "!stop" {
+                    // 확인용: 멈춤 버튼을 누른 것으로 친다.
+                    self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    self.input = said;
+                    self.send(&ctx);
+                }
             }
             let intro_done = self.promo.as_ref().map(|p| p.began.elapsed().as_secs_f32() > PROMO_INTRO - 0.4).unwrap_or(true);
             if intro_done && !self.busy && !talking && self.job_news.is_empty() && self.idle_since.elapsed().as_millis() > 1200 {

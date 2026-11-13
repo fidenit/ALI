@@ -363,7 +363,8 @@ fn layout(board: &Board, width: f32, screen: Vec2, view: &View, only: Option<&st
                 return full;
             }
             match view.cards.get(&c.id) {
-                Some(v) if v.content_h > 0.0 => (HEAD + v.content_h + 14.0).clamp(72.0, full),
+                // 내용이 카드가 정한 크기보다 길면, 화면 한 장에 들어오는 데까지는 카드를 키운다 (카드 안에서 잘리지 않게).
+                Some(v) if v.content_h > 0.0 => (HEAD + v.content_h + 14.0).clamp(72.0, full.max(room.y - ZONE_HEAD - ZONE_PAD)),
                 _ => full,
             }
         };
