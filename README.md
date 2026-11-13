@@ -8,7 +8,11 @@ We built an extraordinary engine and bolted it to a wooden cart.
 
 Every answer comes back as a scroll of paragraphs. Most of it goes unread. The chat window, a tool made for people typing to each other, became the place where we work with a machine that can do far more than type.
 
-ALI takes the scroll away. You say what you need, and the AI arranges the screen for you: a schedule as a timeline, a trip as a route, a choice as a card you tap. It works the way good collaboration tools work, except the collaborator is the AI.
+We have already built many excellent project and collaboration tools. Yet with AI we went back to plain text. And those tools are too complex, with features spread too wide, to be the place where you talk to an AI.
+
+What we want is one place. Every conversation and every topic lives there, shown as the information you actually need, shaped so it reads at a glance, in an interface that adapts as you speak. No tsunami of text.
+
+ALI is that place. You say what you need, and the AI arranges the screen for you: a schedule as a timeline, a trip as a route, a choice as a card you tap.
 
 Nothing like it existed, so we built it. We hope it makes working with AI less tiring and more productive for everyone.
 
@@ -18,13 +22,21 @@ Nothing like it existed, so we built it. We hope it makes working with AI less t
 
 **The screen is the answer.** The AI does not write to you. It edits a board of cards, one line at a time, and you watch the board change. Ask about the same thing again and the same card updates. The board shows where things stand now. It is not a transcript.
 
+![Asking for a to-do list, then reporting progress: the same cards update](docs/images/todo.gif)
+
 **Work comes to you.** When the AI needs a decision or a value from you, that one card moves to the "my turn" slot beside the conversation, and the board slides to the part of the work it belongs to. Answer it and the next one arrives. You do not go looking for what is waiting on you.
+
+![The AI compares options, then brings the question it needs answered to the "my turn" slot](docs/images/myturn.gif)
 
 **One board for everything.** No chat rooms and no threads. Topics sit on a single canvas, grouped into areas the AI creates, renames and merges as your work grows. Zoom out to see everything, zoom in to one card. Finished work is shelved and comes back when you mention it.
 
+![Zooming out from one topic to the whole board, grouped by the AI](docs/images/canvas.gif)
+
 **It draws.** Routes with real distances and travel times, line, bar and donut charts, flows and layouts, pictures. The AI picks the form that reads fastest.
 
-![Charts and a flow diagram drawn by the AI on the board](docs/images/drawings.png)
+![Asking for a drive: the AI finds the places, reads the travel time and draws the route](docs/images/route.gif)
+
+![A trend line, a budget split and a release flow drawn on request](docs/images/charts.gif)
 
 **It remembers.** Facts worth keeping are picked out after every turn. Old conversations related to what you just said are found and brought along. Everything is stored as plain Markdown in a folder you can open in Obsidian.
 
@@ -46,7 +58,7 @@ Keys, the board and the memory vault live in the program's own folder. Move the 
 
 - **The AI acts without asking.** It runs commands and changes files on your computer on its own. ALI was built to be used that way. Run it knowing this, on a machine where that is acceptable.
 - **It costs money as you use it.** By default it uses the most capable Claude model.
-- **It is early.** One person uses it daily. The interface labels are in Korean; the conversation and the cards can be switched to English. See [what is next](docs/NEXT.md).
+- **It is early.** One person uses it daily. Korean and English, switched in the corner. See [what is next](docs/NEXT.md).
 - Distances and times on route cards are read from Kakao Map, so routes work in South Korea.
 
 ## For developers

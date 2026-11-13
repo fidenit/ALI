@@ -256,6 +256,8 @@ struct Slot {
     /// 이 카드가 속한 주제 구역 안에서 격자가 시작되는 지점과, 그 구역의 가로 칸 수
     origin: Vec2,
     limit: i32,
+    /// 이 구역에서 한 칸의 가로 폭. 구역이 화면 폭을 채우도록 칸을 늘리므로 구역마다 다르다.
+    cw: f32,
 }
 
 /// 주제 하나의 구역.
@@ -322,8 +324,27 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
         }
         let ncols = placed.iter().map(|p| p.1 + p.3).max().unwrap_or(1);
         let nrows = placed.iter().map(|p| p.2 + p.4).max().unwrap_or(1);
+        // 오른쪽에 빈 칸이 남은 카드는 그만큼 넓힌다 (구역 안에 구멍이 남지 않게). 사용자가 자리를 정한 카드는 그대로 둔다.
+        let mut order: Vec<usize> = (0..placed.len()).collect();
+        order.sort_by_key(|i| (placed[*i].2, placed[*i].1));
+        for i in order {
+            let (c, col, row, mut w, h) = placed[i];
+            if c.pinned || c.grid.is_some() {
+                continue;
+            }
+            while col + w < ncols && (row..row + h).all(|cy| !used.contains(&(col + w, cy))) {
+                for cy in row..row + h {
+                    used.insert((col + w, cy));
+                }
+                w += 1;
+            }
+            placed[i].3 = w;
+        }
+        // 구역이 자기 몫의 가로 폭을 다 쓰도록 칸을 늘린다. 카드가 너무 넓적해지지 않게 1.6배까지만.
+        let share = if limit == half && half >= 4 { (width - ZONE_GAP) / 2.0 } else { width };
+        let cw = (((share - 2.0 * ZONE_PAD) - (ncols - 1) as f32 * GAP) / ncols as f32).clamp(CW, CW * 1.6);
         let size = vec2(
-            ncols as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD,
+            ncols as f32 * (cw + GAP) - GAP + 2.0 * ZONE_PAD,
             ZONE_HEAD + nrows as f32 * (CH + GAP) - GAP + ZONE_PAD,
         );
         if x > 0.0 && x + size.x > width + 1.0 {
@@ -334,8 +355,8 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
         let min = vec2(x, y);
         let origin = min + vec2(ZONE_PAD, ZONE_HEAD);
         for (c, col, row, w, h) in placed {
-            let pos = origin + vec2(col as f32 * (CW + GAP), row as f32 * (CH + GAP));
-            slots.insert(c.id.clone(), Slot { pos, w, h, col, row, origin, limit, sticky: false });
+            let pos = origin + vec2(col as f32 * (cw + GAP), row as f32 * (CH + GAP));
+            slots.insert(c.id.clone(), Slot { pos, w, h, col, row, origin, limit, sticky: false, cw });
         }
         zones.push(Zone { id: t.id.clone(), name: t.name.clone(), min, size, inbox: false });
         x += size.x + ZONE_GAP;
@@ -348,7 +369,7 @@ fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox
                 Some(v) if v.content_h > 0.0 => (((HEAD + v.content_h + 12.0 + GAP) / (CH + GAP)).ceil() as i32).clamp(1, 12),
                 _ => eff_h(c, view),
             };
-            slots.insert(c.id.clone(), Slot { pos: vec2(0.0, 0.0), w: INBOX_COLS, h, col: 0, row: 0, origin: vec2(0.0, 0.0), limit: INBOX_COLS, sticky: true });
+            slots.insert(c.id.clone(), Slot { pos: vec2(0.0, 0.0), w: INBOX_COLS, h, col: 0, row: 0, origin: vec2(0.0, 0.0), limit: INBOX_COLS, sticky: true, cw: CW });
             let size = vec2(INBOX_COLS as f32 * (CW + GAP) - GAP, h as f32 * (CH + GAP) - GAP);
             zones.push(Zone { id: INBOX_ID.into(), name: "내 차례".into(), min: vec2(0.0, 0.0), size, inbox: true });
         }
@@ -525,7 +546,7 @@ pub fn board(
         // 판은 "내 차례" 구역의 왼쪽만 쓴다. 판 위의 내용이 그 구역 밑으로 들어가 가려지는 일이 없다.
         let area = Rect::from_min_max(full_area.min, pos2((full_area.right() - covered).max(full_area.left() + 200.0), full_area.bottom()));
         let open = area.size();
-        let (mut slots, zones, regions, bounds) = world(board, view, open.x - 8.0);
+        let (mut slots, zones, regions, bounds) = world(board, view, open.x - 36.0);
         slots.extend(inbox_slots);
         // 지금 화면에 없는 카드의 전환 상태는 버린다.
         view.cards.retain(|id, v| v.dying.is_some() || slots.contains_key(id));
@@ -548,9 +569,12 @@ pub fn board(
             let axis = |min: f32, size: f32, lo: f32, hi: f32| if size >= hi - lo { lo } else { min.clamp(lo, hi - size) };
             Rect::from_min_size(pos2(axis(r.min.x, r.width(), limit.min.x, limit.max.x), axis(r.min.y, r.height(), limit.min.y, limit.max.y)), r.size())
         };
+        // 평소의 보기: 내용의 가로가 화면에 들어오면 제 크기(100%)로 위·왼쪽부터 보여 준다 (세로로 길면 끌어서 본다).
+        // 가로로도 넘칠 때만 전체가 들어오게 줄인다. 화면의 위와 좌우가 비지 않는다.
+        let home = if bounds.width() <= open.x - 8.0 { Rect::from_min_size(bounds.min - vec2(16.0, 16.0), area.size()) } else { everything };
         let mut scene = view.scene.unwrap_or(Rect::NOTHING);
         if !(scene.is_finite() && scene.width() > 1.0) {
-            scene = everything;
+            scene = home;
             // 확인용: LYBOARD_ZOOM=0.3 처럼 주면 그 비율로 왼쪽 위부터 보여 준다.
             if let Some(z) = std::env::var("LYBOARD_ZOOM").ok().and_then(|v| v.parse::<f32>().ok()) {
                 scene = Rect::from_min_size(bounds.min - vec2(20.0, 20.0), area.size() / z.clamp(0.05, 1.0));
@@ -559,16 +583,16 @@ pub fn board(
         // 전체를 보고 있었는데 내용이 늘거나 줄었으면(주제가 생김, 보관됨, 다시 꺼냄) 새 전체에 다시 맞춘다.
         if let Some(prev) = view.fit {
             let same = |a: Rect, b: Rect| (a.min - b.min).length() < 2.0 && (a.max - b.max).length() < 2.0;
-            if same(scene, prev) && !same(prev, everything) && view.fly.is_none() {
-                view.fly = Some((scene, everything, now));
+            if same(scene, prev) && !same(prev, home) && view.fly.is_none() {
+                view.fly = Some((scene, home, now));
             }
         }
-        view.fit = Some(everything);
+        view.fit = Some(home);
         if let Some(id) = view.card_goto.clone() {
             // 카드의 자리가 정해진 뒤에 간다 (방금 만든 카드는 다음 프레임에 자리가 생긴다).
             if let Some(s) = slots.get(&id).filter(|s| !s.sticky) {
                 view.card_goto = None;
-                let size = vec2(s.w as f32 * (CW + GAP) - GAP, s.h as f32 * (CH + GAP) - GAP);
+                let size = vec2(s.w as f32 * (s.cw + GAP) - GAP, s.h as f32 * (CH + GAP) - GAP);
                 let card = Rect::from_min_size(s.pos.to_pos2(), size);
                 let zoom_now = area.width() / scene.width();
                 if zoom_now < 0.985 || !scene.shrink(8.0).contains_rect(card) {
@@ -590,8 +614,8 @@ pub fn board(
             if let Some(z) = zones.iter().find(|z| z.id == topic) {
                 let zr = Rect::from_min_size(z.min.to_pos2(), z.size);
                 // 구역이 다 들어오는 크기로, 그러나 읽을 수 있는 크기 아래로는 줄이지 않는다.
-                let k = (open.x / (zr.width() + 60.0)).min(open.y / (zr.height() + 60.0)).clamp(READABLE, 1.0);
-                view.fly = Some((scene, inside(widen(Rect::from_min_size(zr.min - vec2(24.0, 24.0), open / k))), now));
+                let k = (open.x / (zr.width() + 32.0)).clamp(READABLE, 1.0);
+                view.fly = Some((scene, inside(widen(Rect::from_min_size(zr.min - vec2(16.0, 16.0), open / k))), now));
                 view.bounce = false;
                 view.goto = None;
             }
@@ -657,7 +681,8 @@ pub fn board(
                 let s = &slots[&c.id];
                 let (w, h) = (s.w as f32, s.h as f32);
                 let target_pos = s.pos;
-                let target_size = vec2(w * CW + (w - 1.0) * GAP, h * CH + (h - 1.0) * GAP);
+                let cell_w = s.cw;
+                let target_size = vec2(w * cell_w + (w - 1.0) * GAP, h * CH + (h - 1.0) * GAP);
                 let v = view.cards.entry(c.id.clone()).or_insert_with(|| CardView {
                     pos: Tween::fixed(target_pos),
                     size: Tween::fixed(target_size),
@@ -728,7 +753,7 @@ pub fn board(
                     v.dragging = false;
                     // 놓은 자리를 그 주제 구역 안의 가장 가까운 칸으로 맞춘다.
                     let p = v.pos.at(now) - s.origin;
-                    let ncol = ((p.x / (CW + GAP)).round() as i32).clamp(0, (s.limit - w).max(0));
+                    let ncol = ((p.x / (slots.get(&c.id).map(|x| x.cw).unwrap_or(CW) + GAP)).round() as i32).clamp(0, (s.limit - w).max(0));
                     let nrow = ((p.y / (CH + GAP)).round() as i32).max(0);
                     lines.push(format!("move {} {} {}", c.id, ncol, nrow));
                 }
@@ -746,7 +771,7 @@ pub fn board(
                 if rs.drag_stopped() {
                     v.resizing = false;
                     let s = v.size.at(now);
-                    let nw = (((s.x + GAP) / (CW + GAP)).round() as i32).clamp(1, 8);
+                    let nw = (((s.x + GAP) / (slots.get(&c.id).map(|x| x.cw).unwrap_or(CW) + GAP)).round() as i32).clamp(1, 8);
                     let nh = (((s.y + GAP) / (CH + GAP)).round() as i32).clamp(1, 8);
                     if c.grid.is_none() {
                         lines.push(format!("move {} {} {}", c.id, col, row)); // 지금 자리에 고정한 뒤 크기를 바꾼다
@@ -755,7 +780,7 @@ pub fn board(
                 }
                 if c.pinned {
                     let pin = Rect::from_center_size(pos2(rect.right() - 20.0, rect.top() + 25.0), vec2(20.0, 20.0));
-                    let pr = ui.interact(pin, id.with("pin"), Sense::click()).on_hover_text("고정 해제 (자동 배치로 되돌림)");
+                    let pr = ui.interact(pin, id.with("pin"), Sense::click()).on_hover_text(crate::sys::tr("고정 해제 (자동 배치로 되돌림)", "Unpin (back to automatic placement)"));
                     if pr.clicked() {
                         lines.push(format!("unpin {}", c.id));
                     }
@@ -1051,7 +1076,7 @@ pub fn board(
         }
 
         if board.cards.is_empty() {
-            ui.painter().text(area.center(), Align2::CENTER_CENTER, "왼쪽에 말을 걸어 보세요", bold(20.0), FAINT());
+            ui.painter().text(area.center(), Align2::CENTER_CENTER, crate::sys::tr("왼쪽에 말을 걸어 보세요", "Say something on the left"), bold(20.0), FAINT());
         }
     }
     moving
@@ -1104,7 +1129,7 @@ fn world(board: &Board, view: &View, plain_width: f32) -> (HashMap<String, Slot>
         return (slots, zones, Vec::new(), Rect::from_min_size(Pos2::ZERO, max));
     }
     let mut keys: Vec<(String, String)> = board.groups.iter().map(|g| (g.id.clone(), g.name.clone())).collect();
-    keys.push((String::new(), "미분류".to_string()));
+    keys.push((String::new(), crate::sys::tr("미분류", "Ungrouped").to_string()));
     let (mut slots, mut zones, mut regions) = (HashMap::new(), Vec::new(), Vec::new());
     // 맨 윗줄 분류의 이름이 놓일 자리를 위에 남긴다.
     let (mut x, mut y, mut row_h) = (0.0_f32, REGION_GAP * 0.7, 0.0_f32);
@@ -1280,11 +1305,11 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let url = c.field("url").to_string();
             p.rect_filled(body, 10.0, RAISED());
             if url.is_empty() {
-                p.text(body.center(), Align2::CENTER_CENTER, "주소가 아직 없습니다", font(12.0), FAINT());
+                p.text(body.center(), Align2::CENTER_CENTER, crate::sys::tr("주소가 아직 없습니다", "No address yet"), font(12.0), FAINT());
             } else {
                 // 페이지는 제 크기(100%)로 화면 안에 다 들어와야 보인다. 그렇지 않을 때는 누르면 그렇게 보이는 자리로 간다.
-                p.text(body.center() - vec2(0.0, 10.0), Align2::CENTER_CENTER, "눌러서 페이지 보기", bold(14.0), SOFT());
-                p.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, "페이지는 카드가 제 크기로 화면에 다 들어와야 보입니다", font(11.5), FAINT());
+                p.text(body.center() - vec2(0.0, 10.0), Align2::CENTER_CENTER, crate::sys::tr("눌러서 페이지 보기", "Click to view the page"), bold(14.0), SOFT());
+                p.text(body.center() + vec2(0.0, 12.0), Align2::CENTER_CENTER, crate::sys::tr("페이지는 카드가 제 크기로 화면에 다 들어와야 보입니다", "The page shows when the card is at full size and fully on screen"), font(11.5), FAINT());
                 if cx.ui.interact(body, cx.id.with("web-show"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                     cx.lines.push(format!("@show {}", c.id));
                 }
@@ -1299,11 +1324,11 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
         Kind::Status => {
             let state = c.field("state");
             let label = match state {
-                "ok" => "정상",
-                "run" => "진행 중",
-                "wait" => "대기",
-                "fail" => "실패",
-                _ => "멈춤",
+                "ok" => crate::sys::tr("정상", "OK"),
+                "run" => crate::sys::tr("진행 중", "Running"),
+                "wait" => crate::sys::tr("대기", "Waiting"),
+                "fail" => crate::sys::tr("실패", "Failed"),
+                _ => crate::sys::tr("멈춤", "Idle"),
             };
             state_dot(p, pos2(x + 8.0, top + 12.0), state, now, cx.moving);
             p.text(pos2(x + 26.0, top - 1.0), Align2::LEFT_TOP, label, bold(18.0), state_color(state));
@@ -1423,7 +1448,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let map = Rect::from_min_max(body.min, pos2(body.right(), (body.bottom() - list_h).max(body.top() + 170.0)));
             p.rect_filled(map, 14.0, mix(CARD(), RAISED(), 0.45));
             if stops.len() < 2 {
-                p.text(map.center(), Align2::CENTER_CENTER, "들르는 곳이 둘 이상 있어야 길을 그립니다", font(12.5), FAINT());
+                p.text(map.center(), Align2::CENTER_CENTER, crate::sys::tr("들르는 곳이 둘 이상 있어야 길을 그립니다", "A route needs at least two stops"), font(12.5), FAINT());
                 return map.height();
             }
             // 저장해 둔 길의 모양. 없거나 지금의 출발·도착과 맞지 않으면 곧은 선으로 잇는다.
@@ -1827,11 +1852,11 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                         let open_key = format!("{item}#open");
                         let open = editable && cx.inputs.get(&open_key).map(|v| v == "1").unwrap_or(false);
                         if value.is_empty() {
-                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, "날짜 고르기", font(14.0), FAINT());
+                            rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, crate::sys::tr("날짜 고르기", "Pick a date"), font(14.0), FAINT());
                         } else {
                             rp.text(pos2(r.left() + 12.0, r.center().y), Align2::LEFT_CENTER, &value, font(14.0), TEXT());
                         }
-                        rp.text(pos2(r.right() - 14.0, r.center().y), Align2::RIGHT_CENTER, if open { "닫기" } else { "달력" }, font(11.0), DIM());
+                        rp.text(pos2(r.right() - 14.0, r.center().y), Align2::RIGHT_CENTER, if open { crate::sys::tr("닫기", "Close") } else { crate::sys::tr("달력", "Calendar") }, font(11.0), DIM());
                         if editable && cx.click(r, ("date", item.as_str())).map(|x| x.clicked()).unwrap_or(false) {
                             cx.input_ops.push((open_key.clone(), if open { "0".into() } else { "1".into() }));
                         }
@@ -1853,8 +1878,8 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                             let cal_top = r.bottom() + 8.0;
                             let (cw, chh) = (w / 7.0, 26.0);
                             // 머리: 이전 달, 연·월, 다음 달
-                            rp.text(pos2(x + w / 2.0, cal_top + 11.0), Align2::CENTER_CENTER, format!("{yy}년 {mm}월"), bold(13.0), TEXT());
-                            for (dir, label, bx) in [(-1i32, "이전", x), (1, "다음", x + w - 44.0)] {
+                            rp.text(pos2(x + w / 2.0, cal_top + 11.0), Align2::CENTER_CENTER, if crate::sys::english() { format!("{} {yy}", ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][(mm as usize + 11) % 12]) } else { format!("{yy}년 {mm}월") }, bold(13.0), TEXT());
+                            for (dir, label, bx) in [(-1i32, crate::sys::tr("이전", "Prev"), x), (1, crate::sys::tr("다음", "Next"), x + w - 44.0)] {
                                 let br = Rect::from_min_size(pos2(bx, cal_top), vec2(44.0, 22.0));
                                 let hov = cx.click(br, (if dir < 0 { "calprev" } else { "calnext" }, item.as_str()));
                                 rp.text(br.center(), Align2::CENTER_CENTER, label, font(11.5), if hov.as_ref().map(|h| h.hovered()).unwrap_or(false) { TEXT() } else { DIM() });
@@ -1863,7 +1888,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                                     cx.input_ops.push((ym_key.clone(), format!("{:04}-{:02}", total.div_euclid(12), total.rem_euclid(12) + 1)));
                                 }
                             }
-                            let names = ["일", "월", "화", "수", "목", "금", "토"];
+                            let names = if crate::sys::english() { ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] } else { ["일", "월", "화", "수", "목", "금", "토"] };
                             for (i, n) in names.iter().enumerate() {
                                 rp.text(pos2(x + cw * (i as f32 + 0.5), cal_top + 34.0), Align2::CENTER_CENTER, *n, font(10.5), FAINT());
                             }
@@ -1894,7 +1919,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                         rp.rect_filled(r, 11.0, RAISED());
                         rp.rect_stroke(r, 11.0, Stroke::new(1.0, BORDER()), StrokeKind::Inside);
                         let numeric = matches!(kind, InputKind::Number);
-                        let hint = if numeric { "숫자".to_string() } else if spec == "-" { String::new() } else { spec.to_string() };
+                        let hint = if numeric { crate::sys::tr("숫자", "Number").to_string() } else if spec == "-" { String::new() } else { spec.to_string() };
                         if !editable {
                             // 이미 보냈거나 멀리서 보는 중: 적힌 값만 보여 준다.
                             let inner = rp.with_clip_rect(r.shrink2(vec2(12.0, 0.0)).intersect(rp.clip_rect()));
@@ -1912,13 +1937,13 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             }
             let br = Rect::from_min_size(pos2(x + w - 92.0, y + 2.0), vec2(92.0, 34.0));
             if sent {
-                p.text(br.right_center(), Align2::RIGHT_CENTER, "보냈습니다", font(12.5), DIM());
+                p.text(br.right_center(), Align2::RIGHT_CENTER, crate::sys::tr("보냈습니다", "Sent"), font(12.5), DIM());
             } else {
                 let ready = c.items.iter().any(|(i, _)| cx.inputs.get(i).map(|v| !v.trim().is_empty()).unwrap_or(false));
                 let resp = cx.click(br, ("send", ""));
                 let hover = resp.as_ref().map(|r| r.hovered()).unwrap_or(false);
                 p.rect_filled(br, 17.0, if ready { mix(SOFT(), TEXT(), if hover { 1.0 } else { 0.0 }) } else { RAISED() });
-                p.text(br.center(), Align2::CENTER_CENTER, "보내기", bold(13.5), if ready { CARD() } else { FAINT() });
+                p.text(br.center(), Align2::CENTER_CENTER, crate::sys::tr("보내기", "Send"), bold(13.5), if ready { CARD() } else { FAINT() });
                 if ready && resp.map(|r| r.clicked()).unwrap_or(false) {
                     let out = input_lines(c, cx.inputs);
                     cx.lines.extend(out);
@@ -1935,7 +1960,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let area = Rect::from_min_max(body.min, pos2(body.right(), top + h - if caption.is_empty() { 0.0 } else { 24.0 }));
             if src.is_empty() {
                 p.rect_filled(area, 10.0, RAISED());
-                p.text(area.center(), Align2::CENTER_CENTER, "그림이 아직 없습니다", font(12.0), FAINT());
+                p.text(area.center(), Align2::CENTER_CENTER, crate::sys::tr("그림이 아직 없습니다", "No picture yet"), font(12.0), FAINT());
             } else {
                 match crate::pics::show(cx.ui.ctx(), &src) {
                     crate::pics::Shown::Ready(id, size) => {
@@ -1945,7 +1970,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     }
                     crate::pics::Shown::Loading => {
                         p.rect_filled(area, 10.0, RAISED());
-                        p.text(area.center(), Align2::CENTER_CENTER, "그림을 불러오는 중", font(12.0), FAINT());
+                        p.text(area.center(), Align2::CENTER_CENTER, crate::sys::tr("그림을 불러오는 중", "Loading the picture"), font(12.0), FAINT());
                         *cx.moving = true;
                     }
                     crate::pics::Shown::Failed(why) => {

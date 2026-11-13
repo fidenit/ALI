@@ -41,23 +41,27 @@ fn plain(activity: &str) -> String {
     let short = |s: &str| s.chars().take(24).collect::<String>();
     let with = |what: &str, extra: &str| if extra.is_empty() { what.to_string() } else { format!("{what} · {}", short(extra)) };
     match kind {
-        "명령 실행" => "컴퓨터에서 작업하는 중".to_string(),
-        "파일 읽기" => with("파일을 읽는 중", name),
-        "파일 쓰기" => with("파일을 만드는 중", name),
-        "파일 고치기" => with("파일을 고치는 중", name),
-        "폴더 보기" => with("폴더를 살펴보는 중", name),
-        "글자 찾기" => "파일에서 찾는 중".to_string(),
-        "기억 찾기" | "기억 읽기" => "기억을 찾아보는 중".to_string(),
-        "기억 쓰기" | "기억 덧붙이기" => "기억해 두는 중".to_string(),
-        "페이지 읽기" | "페이지 조작" => "페이지를 살펴보는 중".to_string(),
-        "웹 검색" => with("웹에서 찾는 중", detail),
-        "웹 페이지 읽기" => "웹 페이지를 읽는 중".to_string(),
-        "작업 맡기기" => with("작업자에게 맡기는 중", detail),
-        "작업자에게 전하기" | "작업 멈추기" | "작업 결과 보기" | "맡긴 작업 확인" => "맡긴 작업을 확인하는 중".to_string(),
-        "장소 찾기" => with("장소를 찾는 중", detail),
-        "길 찾기" => "길을 찾는 중".to_string(),
-        "그림 보기" => "그림을 보는 중".to_string(),
-        "보드 읽기" => "화면 내용을 확인하는 중".to_string(),
+        "명령 실행" => crate::sys::tr("컴퓨터에서 작업하는 중", "Working on the computer").to_string(),
+        "파일 읽기" => with(crate::sys::tr("파일을 읽는 중", "Reading a file"), name),
+        "파일 쓰기" => with(crate::sys::tr("파일을 만드는 중", "Writing a file"), name),
+        "파일 고치기" => with(crate::sys::tr("파일을 고치는 중", "Editing a file"), name),
+        "폴더 보기" => with(crate::sys::tr("폴더를 살펴보는 중", "Looking through a folder"), name),
+        "글자 찾기" => crate::sys::tr("파일에서 찾는 중", "Searching files").to_string(),
+        "기억 찾기" | "기억 읽기" => crate::sys::tr("기억을 찾아보는 중", "Checking memory").to_string(),
+        "기억 쓰기" | "기억 덧붙이기" => crate::sys::tr("기억해 두는 중", "Saving to memory").to_string(),
+        "페이지 읽기" | "페이지 조작" => crate::sys::tr("페이지를 살펴보는 중", "Looking at the page").to_string(),
+        "웹 검색" => with(crate::sys::tr("웹에서 찾는 중", "Searching the web"), detail),
+        "웹 페이지 읽기" => crate::sys::tr("웹 페이지를 읽는 중", "Reading a web page").to_string(),
+        "작업 맡기기" => with(crate::sys::tr("작업자에게 맡기는 중", "Handing off to a worker"), detail),
+        "작업자에게 전하기" | "작업 멈추기" | "작업 결과 보기" | "맡긴 작업 확인" => crate::sys::tr("맡긴 작업을 확인하는 중", "Checking delegated work").to_string(),
+        "장소 찾기" => with(crate::sys::tr("장소를 찾는 중", "Finding a place"), detail),
+        "길 찾기" => crate::sys::tr("길을 찾는 중", "Finding the route").to_string(),
+        "그림 보기" => crate::sys::tr("그림을 보는 중", "Looking at a picture").to_string(),
+        "보드 읽기" => crate::sys::tr("화면 내용을 확인하는 중", "Checking the board").to_string(),
+        "웹 검색 중" => crate::sys::tr(crate::sys::tr("웹에서 찾는 중", "Searching the web"), "Searching the web").to_string(),
+        "웹 페이지 읽는 중" => crate::sys::tr(crate::sys::tr("웹 페이지를 읽는 중", "Reading a web page"), "Reading a web page").to_string(),
+        // 영어 화면에서는 이름을 모르는 일도 한국어로 내보이지 않는다.
+        _ if crate::sys::english() => "Working".to_string(),
         _ => activity.to_string(),
     }
 }
@@ -77,7 +81,7 @@ impl App {
                     .inner_margin(egui::Margin::same(18))
                     .show(ui, |ui| {
                         ui.set_min_size(ui.available_size());
-                        // 내가 할 일이 있으면 이 구역을 위아래로 반씩 나눈다: 위는 "내 차례"(지금 처리할 일 하나), 아래는 대화.
+                        // 내가 할 일이 있으면 이 구역을 위아래로 반씩 나눈다: 위는 crate::sys::tr("내 차례", "My turn")(지금 처리할 일 하나), 아래는 대화.
                         let whole = ui.available_rect_before_wrap();
                         let asks = self.board.cards.iter().filter(|c| c.kind.asks()).count();
                         let lower = if asks > 0 {
@@ -118,7 +122,7 @@ impl App {
             });
     }
 
-    /// "내 차례": 내가 답하거나 승인해야 할 일이 하나씩 여기로 온다. 처리하면 다음 일이 온다.
+    /// crate::sys::tr("내 차례", "My turn"): 내가 답하거나 승인해야 할 일이 하나씩 여기로 온다. 처리하면 다음 일이 온다.
     /// 여기서는 머리 줄만 그리고 카드 자리를 잡아 둔다. 카드는 보드가 그 자리에 그린다.
     fn task_slot(&mut self, ui: &mut egui::Ui, asks: usize) {
         let now = ui.input(|i| i.time);
@@ -127,16 +131,16 @@ impl App {
         let dot = r.rect.left_center() + egui::vec2(8.0, 0.0);
         p.circle_filled(dot, 4.0 + 3.0 * pulse, ui::ORANGE().gamma_multiply(0.25 * (1.0 - pulse)));
         p.circle_filled(dot, 4.0, ui::ORANGE());
-        let tr = p.text(r.rect.left_center() + egui::vec2(22.0, 0.0), egui::Align2::LEFT_CENTER, "내 차례", ui::bold(15.0), ui::TEXT());
+        let tr = p.text(r.rect.left_center() + egui::vec2(22.0, 0.0), egui::Align2::LEFT_CENTER, crate::sys::tr("내 차례", "My turn"), ui::bold(15.0), ui::TEXT());
         // 남은 일의 수. 지금 앞에 있는 것까지 센다.
-        p.text(egui::pos2(tr.right() + 10.0, tr.center().y), egui::Align2::LEFT_CENTER, format!("남은 {asks}건"), ui::bold(12.5), ui::ORANGE());
+        p.text(egui::pos2(tr.right() + 10.0, tr.center().y), egui::Align2::LEFT_CENTER, if crate::sys::english() { format!("{asks} left") } else { format!("남은 {asks}건") }, ui::bold(12.5), ui::ORANGE());
         // 다른 일부터 보고 싶으면 넘긴다.
         if asks > 1 {
             let br = Rect::from_min_size(egui::pos2(r.rect.right() - 62.0, r.rect.top() + 2.0), egui::vec2(60.0, 26.0));
             let b = ui.interact(br, ui.scope_id().with("task-next"), egui::Sense::click());
             p.rect_stroke(br, 13.0, egui::Stroke::new(1.0, if b.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
-            p.text(br.center(), egui::Align2::CENTER_CENTER, "다음 ›", ui::bold(12.0), if b.hovered() { ui::TEXT() } else { ui::DIM() });
-            if b.on_hover_text("이 일은 나중에 하고 다음 일부터 봅니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            p.text(br.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("다음 ›", "Next ›"), ui::bold(12.0), if b.hovered() { ui::TEXT() } else { ui::DIM() });
+            if b.on_hover_text(crate::sys::tr("이 일은 나중에 하고 다음 일부터 봅니다", "Leave this for later and see the next one")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.next_task();
             }
         }
@@ -147,7 +151,7 @@ impl App {
         self.view.task_rect = Some(rest);
         if self.view.task.is_none() {
             // 방금 한 답을 반영하는 중: 끝나면 다음 일이 이 자리로 온다.
-            ui.painter().text(rest.left_top() + egui::vec2(4.0, 10.0), egui::Align2::LEFT_TOP, "답을 반영하는 중입니다. 끝나면 다음 일이 옵니다.", ui::font(12.5), ui::FAINT());
+            ui.painter().text(rest.left_top() + egui::vec2(4.0, 10.0), egui::Align2::LEFT_TOP, crate::sys::tr("답을 반영하는 중입니다. 끝나면 다음 일이 옵니다.", "Applying your answer. The next one comes when it is done."), ui::font(12.5), ui::FAINT());
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); // 점이 깜빡인다
     }
@@ -158,9 +162,9 @@ impl App {
         // 왼쪽 끝: 밝은 화면 / 어두운 화면
         let t = Rect::from_min_size(r.rect.left_top(), egui::vec2(60.0, 20.0));
         let tr = ui.interact(t, ui.scope_id().with("theme"), egui::Sense::click());
-        let label = if ui::is_light() { "어둡게" } else { "밝게" };
+        let label = if ui::is_light() { crate::sys::tr("어둡게", "Dark") } else { crate::sys::tr("밝게", "Light") };
         p.text(t.left_center(), egui::Align2::LEFT_CENTER, label, ui::font(11.0), if tr.hovered() { ui::TEXT() } else { ui::FAINT() });
-        if tr.on_hover_text("밝은 화면과 어두운 화면을 바꿉니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        if tr.on_hover_text(crate::sys::tr("밝은 화면과 어두운 화면을 바꿉니다", "Switch between light and dark")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             crate::set_theme(ui.ctx(), !ui::is_light(), true);
             self.titlebar_done = false;
         }
@@ -189,12 +193,12 @@ impl App {
             let yes = Rect::from_min_size(egui::pos2(r.rect.right() - 118.0, r.rect.top()), egui::vec2(66.0, 20.0));
             let no = Rect::from_min_size(egui::pos2(r.rect.right() - 46.0, r.rect.top()), egui::vec2(46.0, 20.0));
             let warn = p.with_clip_rect(Rect::from_min_max(r.rect.min, egui::pos2(yes.left() - 8.0, r.rect.bottom())));
-            warn.text(r.rect.left_center(), egui::Align2::LEFT_CENTER, "화면·대화·기억·기록을 전부 지웁니다", ui::bold(11.5), ui::RED());
+            warn.text(r.rect.left_center(), egui::Align2::LEFT_CENTER, crate::sys::tr("화면·대화·기억·기록을 전부 지웁니다", "Erases the board, chat, memory and records"), ui::bold(11.5), ui::RED());
             let y = ui.interact(yes, ui.scope_id().with("reset-yes"), egui::Sense::click());
             let n = ui.interact(no, ui.scope_id().with("reset-no"), egui::Sense::click());
             p.rect_stroke(yes, 10.0, egui::Stroke::new(1.0, ui::RED()), egui::StrokeKind::Inside);
-            p.text(yes.center(), egui::Align2::CENTER_CENTER, "지우기", ui::bold(11.5), ui::RED());
-            p.text(no.center(), egui::Align2::CENTER_CENTER, "취소", ui::bold(11.5), if n.hovered() { ui::TEXT() } else { ui::DIM() });
+            p.text(yes.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("지우기", "Erase"), ui::bold(11.5), ui::RED());
+            p.text(no.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("취소", "Cancel"), ui::bold(11.5), if n.hovered() { ui::TEXT() } else { ui::DIM() });
             if y.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.reset_armed = None;
                 self.reset_all();
@@ -205,8 +209,8 @@ impl App {
         } else {
             let b = Rect::from_min_size(egui::pos2(r.rect.right() - 46.0, r.rect.top()), egui::vec2(46.0, 20.0));
             let resp = ui.interact(b, ui.scope_id().with("reset"), egui::Sense::click());
-            p.text(b.right_center(), egui::Align2::RIGHT_CENTER, "초기화", ui::font(11.0), if resp.hovered() { ui::TEXT() } else { ui::FAINT() });
-            if resp.on_hover_text("화면, 대화, 기억, 기록을 전부 지우고 처음부터 시작합니다 (API 키와 설정은 남습니다)").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            p.text(b.right_center(), egui::Align2::RIGHT_CENTER, crate::sys::tr("초기화", "Reset"), ui::font(11.0), if resp.hovered() { ui::TEXT() } else { ui::FAINT() });
+            if resp.on_hover_text(crate::sys::tr("화면, 대화, 기억, 기록을 전부 지우고 처음부터 시작합니다 (API 키와 설정은 남습니다)", "Erase the board, chat, memory and records and start over (API keys and settings stay)")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.reset_armed = Some(std::time::Instant::now());
             }
         }
@@ -221,7 +225,7 @@ impl App {
             return;
         }
         let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
-        let label = if self.show_shelf { "← 대화로 돌아가기".to_string() } else { format!("보관된 주제 {n}개  ›") };
+        let label = if self.show_shelf { crate::sys::tr("← 대화로 돌아가기", "← Back to chat").to_string() } else { if crate::sys::english() { format!("{n} shelved  ›") } else { format!("보관된 주제 {n}개  ›") } };
         p.text(r.rect.left_center() + egui::vec2(4.0, 0.0), egui::Align2::LEFT_CENTER, label, ui::bold(12.5), if r.hovered() { ui::TEXT() } else { ui::DIM() });
         if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             self.show_shelf = !self.show_shelf;
@@ -236,7 +240,7 @@ impl App {
         egui::ScrollArea::vertical().auto_shrink(false).max_height(ui.available_height()).show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.set_width(width);
-                ui.label(egui::RichText::new("보관된 주제 · 누르면 화면으로 다시 꺼냅니다").size(12.0).color(ui::FAINT()));
+                ui.label(egui::RichText::new(crate::sys::tr("보관된 주제 · 누르면 화면으로 다시 꺼냅니다", "Shelved topics · click one to bring it back")).size(12.0).color(ui::FAINT()));
                 ui.add_space(8.0);
                 for s in self.board.shelf.iter().rev() {
                     let (r, p) = ui.allocate_painter(egui::vec2(width - 6.0, 46.0), egui::Sense::click());
@@ -246,7 +250,7 @@ impl App {
                     let inner = p.with_clip_rect(r.rect.shrink2(egui::vec2(12.0, 0.0)));
                     inner.text(r.rect.left_top() + egui::vec2(14.0, 8.0), egui::Align2::LEFT_TOP, &s.topic.name, ui::bold(13.5), ui::TEXT());
                     let titles: Vec<&str> = s.cards.iter().take(4).map(|c| c.title.as_str()).collect();
-                    inner.text(r.rect.left_top() + egui::vec2(14.0, 27.0), egui::Align2::LEFT_TOP, format!("카드 {}장 · {}", s.cards.len(), titles.join(", ")), ui::font(11.0), ui::FAINT());
+                    inner.text(r.rect.left_top() + egui::vec2(14.0, 27.0), egui::Align2::LEFT_TOP, if crate::sys::english() { format!("{} cards · {}", s.cards.len(), titles.join(", ")) } else { format!("카드 {}장 · {}", s.cards.len(), titles.join(", ")) }, ui::font(11.0), ui::FAINT());
                     if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                         back = Some(s.topic.id.clone());
                     }
@@ -283,7 +287,7 @@ impl App {
                 let n = self.recent.len();
                 if n == 0 && !self.busy {
                     if self.board.say.is_empty() {
-                        ui.label(egui::RichText::new("무엇이든 말하세요.\n답은 오른쪽 화면에 카드로 나타납니다.").size(13.5).color(ui::FAINT()));
+                        ui.label(egui::RichText::new(crate::sys::tr("무엇이든 말하세요.\n답은 오른쪽 화면에 카드로 나타납니다.", "Say anything.\nThe answer appears as cards on the right.")).size(13.5).color(ui::FAINT()));
                     } else {
                         yours(ui, &self.board.say.clone(), true);
                     }
@@ -305,7 +309,7 @@ impl App {
                         .or_else(|| self.say_live.clone())
                         .or_else(|| self.turn_said.then(|| self.board.say.clone()))
                         // 아직 한마디가 없는데 일은 시작했으면, 말없이 일하는 것처럼 보이지 않게 한다.
-                        .or_else(|| (!self.activity.is_empty() && !self.tidying).then(|| "확인하고 있어요.".to_string()));
+                        .or_else(|| (!self.activity.is_empty() && !self.tidying).then(|| crate::sys::tr("확인하고 있어요.", "Looking into it.").to_string()));
                     if let Some(text) = live.filter(|t| !t.is_empty()) {
                         yours(ui, &text, true);
                     }
@@ -316,11 +320,11 @@ impl App {
                     }
                 }
                 if self.standby {
-                    ui.label(egui::RichText::new("기다리는 중 · 부르거나 하던 얘기로 돌아오면 다시 들어요").size(13.0).color(ui::FAINT()));
+                    ui.label(egui::RichText::new(crate::sys::tr("기다리는 중 · 부르거나 하던 얘기로 돌아오면 다시 들어요", "Waiting · call me or come back to the topic and I will listen")).size(13.0).color(ui::FAINT()));
                     ui.add_space(3.0);
                 }
                 for w in &waiting {
-                    ui.label(egui::RichText::new(format!("곧 전함 · {w}")).size(13.0).color(ui::FAINT()));
+                    ui.label(egui::RichText::new(if crate::sys::english() { format!("Queued · {w}") } else { format!("곧 전함 · {w}") }).size(13.0).color(ui::FAINT()));
                     ui.add_space(3.0);
                 }
             });
@@ -344,7 +348,7 @@ impl App {
             let size = (level * 60.0).clamp(0.0, 7.0);
             p.circle_stroke(dot, 4.0 + size, egui::Stroke::new(1.3, ui::TEXT().gamma_multiply(0.6)));
             p.circle_filled(dot, 3.0, ui::TEXT());
-            let text = if self.heard { "듣는 중 · 말이 끝나면 알아서 보냅니다" } else { "듣는 중 · 말씀하세요" };
+            let text = if self.heard { crate::sys::tr("듣는 중 · 말이 끝나면 알아서 보냅니다", "Listening · I send it when you stop") } else { crate::sys::tr("듣는 중 · 말씀하세요", "Listening · go ahead") };
             p.with_clip_rect(r.rect).text(r.rect.left_center() + egui::vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(12.5), ui::TEXT());
             ctx.request_repaint();
             return;
@@ -363,19 +367,20 @@ impl App {
         }
         let what = if !self.busy {
             if talking {
-                "말하는 중".to_string()
+                crate::sys::tr("말하는 중", "Speaking").to_string()
             } else if writing_down {
-                "받아쓰는 중".to_string()
+                crate::sys::tr("받아쓰는 중", "Transcribing").to_string()
             } else {
-                "받았어요".to_string()
+                crate::sys::tr("받았어요", "Got it").to_string()
             }
         } else if !self.activity.is_empty() {
             plain(&self.activity)
         } else if !self.got_output {
             match self.pre.as_ref().and_then(|p| p.kind.clone()) {
+                Some(_) if crate::sys::english() => "Thinking".to_string(),
                 Some(kind) => format!("{kind} · 생각하는 중"),
-                None if self.tidying => "분류와 주제 정리 중".to_string(),
-                None => "생각하는 중".to_string(),
+                None if self.tidying => crate::sys::tr("분류와 주제 정리 중", "Tidying topics").to_string(),
+                None => crate::sys::tr("생각하는 중", "Thinking").to_string(),
             }
         } else {
             // 지금 쓰고 있는 카드와, 이번 턴에 그 카드에 넣은 항목 수
@@ -387,12 +392,18 @@ impl App {
                 Some((id, title)) => {
                     let n = self.turn_raw.lines().filter(|l| l.starts_with(&format!("add {id} ")) || l.starts_with(&format!("upd {id} "))).count();
                     let title: String = title.chars().take(18).collect();
-                    if n > 0 { format!("'{title}' 쓰는 중 · {n}줄") } else { format!("'{title}' 쓰는 중") }
+                    if crate::sys::english() {
+                        if n > 0 { format!("Writing '{title}' · {n} lines") } else { format!("Writing '{title}'") }
+                    } else if n > 0 {
+                        format!("'{title}' 쓰는 중 · {n}줄")
+                    } else {
+                        format!("'{title}' 쓰는 중")
+                    }
                 }
-                None => "화면에 쓰는 중".to_string(),
+                None => crate::sys::tr("화면에 쓰는 중", "Writing to the board").to_string(),
             }
         };
-        let text = if self.busy { format!("{what} · {}초", self.sent_at.elapsed().as_secs()) } else { what };
+        let text = if self.busy { format!("{what} · {}{}", self.sent_at.elapsed().as_secs(), crate::sys::tr("초", "s")) } else { what };
         // 멈춤: 도는 턴을 그만두게 한다. 글자는 이 버튼 왼쪽까지만 그려서 겹치지 않게 한다.
         let mut right = r.rect.right();
         if self.busy {
@@ -401,8 +412,8 @@ impl App {
             right = b.left() - 8.0;
             let resp = ui.interact(b, ui.scope_id().with("stop-turn"), egui::Sense::click());
             p.rect_stroke(b, 11.0, egui::Stroke::new(1.0, if resp.hovered() { ui::TEXT() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
-            p.text(b.center(), egui::Align2::CENTER_CENTER, if stopping { "멈추는 중" } else { "멈춤" }, ui::bold(if stopping { 10.5 } else { 11.5 }), if resp.hovered() { ui::TEXT() } else { ui::DIM() });
-            if resp.on_hover_text("지금 하는 일을 그만두게 합니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            p.text(b.center(), egui::Align2::CENTER_CENTER, if stopping { crate::sys::tr("멈추는 중", "Stopping") } else { crate::sys::tr("멈춤", "Stop") }, ui::bold(if stopping { 10.5 } else { 11.5 }), if resp.hovered() { ui::TEXT() } else { ui::DIM() });
+            if resp.on_hover_text(crate::sys::tr("지금 하는 일을 그만두게 합니다", "Stop what it is doing now")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -430,7 +441,7 @@ impl App {
                 p.rect_stroke(r.rect, 12.0, egui::Stroke::new(1.0, if r.hovered() { ui::TEXT() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
                 if r.hovered() {
                     p.rect_filled(r.rect, 12.0, egui::Color32::from_black_alpha(140));
-                    p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "빼기", ui::bold(12.0), ui::TEXT());
+                    p.text(r.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("빼기", "Remove"), ui::bold(12.0), ui::TEXT());
                 }
                 if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     remove = Some(n);
@@ -452,7 +463,7 @@ impl App {
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut self.input)
-                        .hint_text(if self.busy { "답하는 중에도 적으면 이어서 전합니다" } else { "무엇이든 말하세요 · 사진은 붙여넣거나 끌어다 놓으세요" })
+                        .hint_text(if self.busy { crate::sys::tr("답하는 중에도 적으면 이어서 전합니다", "Keep typing, it will be passed along") } else { crate::sys::tr("무엇이든 말하세요 · 사진은 붙여넣거나 끌어다 놓으세요", "Say anything · paste or drop pictures here") })
                         .desired_width(f32::INFINITY)
                         .desired_rows(2)
                         // Enter 는 보내기, 줄을 바꾸려면 Shift+Enter
@@ -492,9 +503,9 @@ impl App {
             let (pr, pp) = ui.allocate_painter(egui::vec2(64.0, 40.0), egui::Sense::click());
             pp.rect_filled(pr.rect, 20.0, FIELD());
             pp.rect_stroke(pr.rect, 20.0, egui::Stroke::new(1.0, if pr.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
-            pp.text(pr.rect.center(), egui::Align2::CENTER_CENTER, "사진", ui::bold(13.0), if pr.hovered() { ui::TEXT() } else { ui::DIM() });
-            if pr.on_hover_text("사진 파일을 골라 붙입니다 · 캡처한 그림은 Ctrl+V 로 바로 붙습니다").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                let picked = rfd::FileDialog::new().add_filter("사진", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]).pick_files().unwrap_or_default();
+            pp.text(pr.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("사진", "Photo"), ui::bold(13.0), if pr.hovered() { ui::TEXT() } else { ui::DIM() });
+            if pr.on_hover_text(crate::sys::tr("사진 파일을 골라 붙입니다 · 캡처한 그림은 Ctrl+V 로 바로 붙습니다", "Attach picture files · paste a capture with Ctrl+V")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                let picked = rfd::FileDialog::new().add_filter(crate::sys::tr("사진", "Pictures"), &["png", "jpg", "jpeg", "webp", "gif", "bmp"]).pick_files().unwrap_or_default();
                 for path in picked {
                     self.add_pic(ctx, crate::pics::from_file(&path.display().to_string()));
                 }
@@ -502,26 +513,26 @@ impl App {
             let (nr, np) = ui.allocate_painter(egui::vec2(64.0, 40.0), egui::Sense::click());
             np.rect_filled(nr.rect, 20.0, FIELD());
             np.rect_stroke(nr.rect, 20.0, egui::Stroke::new(1.0, if nr.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
-            np.text(nr.rect.center(), egui::Align2::CENTER_CENTER, "기록", ui::bold(13.0), if nr.hovered() { ui::TEXT() } else { ui::DIM() });
-            if nr.on_hover_text("오늘의 기록과 기억 보관함 열기").on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            np.text(nr.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("기록", "Log"), ui::bold(13.0), if nr.hovered() { ui::TEXT() } else { ui::DIM() });
+            if nr.on_hover_text(crate::sys::tr("오늘의 기록과 기억 보관함 열기", "Open today's record and the memory vault")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 let (date, _) = sys::now_local();
                 let today = vault::root().join("기록").join(format!("{date}.md"));
                 sys::open_note(&vault::root(), &today);
             }
             // 음성: AI 의 답을 소리로 듣는다.
-            let hint = if self.voice { "음성 켜짐 · 누르면 끕니다" } else { "음성 꺼짐 · 누르면 켭니다" };
-            if switch(ui, ctx, "voice-toggle", "음성", self.voice, hint) {
+            let hint = if self.voice { crate::sys::tr("음성 켜짐 · 누르면 끕니다", "Voice on · click to turn off") } else { crate::sys::tr("음성 꺼짐 · 누르면 켭니다", "Voice off · click to turn on") };
+            if switch(ui, ctx, "voice-toggle", crate::sys::tr("음성", "Voice"), self.voice, hint) {
                 toggle = Some(!self.voice);
             }
             // 대화: 마이크로 말해서 시킨다. 말이 끝나면 알아서 보내고, 답을 다 들으면 다시 듣는다.
             let hint = if crate::eleven::key().is_none() {
-                "말로 대화하려면 ElevenLabs 키가 필요합니다 (프로그램 폴더의 eleven.txt)"
+                crate::sys::tr("말로 대화하려면 ElevenLabs 키가 필요합니다 (프로그램 폴더의 eleven.txt)", "Talking needs an ElevenLabs key (eleven.txt in the program folder)")
             } else if self.converse {
-                "말로 대화하는 중 · 누르면 마이크를 끕니다"
+                crate::sys::tr("말로 대화하는 중 · 누르면 마이크를 끕니다", "Talking · click to turn the microphone off")
             } else {
-                "누르면 마이크를 켜고 말로 대화합니다"
+                crate::sys::tr("누르면 마이크를 켜고 말로 대화합니다", "Click to turn the microphone on and talk")
             };
-            if switch(ui, ctx, "mic-toggle", "대화", self.converse, hint) && crate::eleven::key().is_some() {
+            if switch(ui, ctx, "mic-toggle", crate::sys::tr("대화", "Talk"), self.converse, hint) && crate::eleven::key().is_some() {
                 talk = Some(!self.converse);
             }
         });
@@ -558,7 +569,7 @@ impl App {
         let ready = self.key_input.trim().len() > 20;
         let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
         p.rect_filled(r.rect, 20.0, if ready { ui::TEXT() } else { FIELD() });
-        p.text(r.rect.center(), egui::Align2::CENTER_CENTER, "저장하고 시작", ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
+        p.text(r.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("저장하고 시작", "Save and start"), ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
         if ready && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
             let base = sys::base_dir();
             let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
@@ -571,12 +582,12 @@ impl App {
             self.start_real_mode();
         }
         ui.add_space(8.0);
-        field(ui, &mut self.jev_input, "TypeSafe Jev 키 (선택 · 없어도 됩니다)");
+        field(ui, &mut self.jev_input, crate::sys::tr("TypeSafe Jev 키 (선택 · 없어도 됩니다)", "TypeSafe Jev key (optional)"));
         ui.add_space(6.0);
-        field(ui, &mut self.key_input, "Claude API 키 (sk-ant-…)");
+        field(ui, &mut self.key_input, crate::sys::tr("Claude API 키 (sk-ant-…)", "Claude API key (sk-ant-…)"));
         ui.add_space(8.0);
         ui.label(
-            egui::RichText::new("처음이시군요. 본인의 Claude API 키를 넣어 주세요.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고 다른 곳으로 보내지지 않습니다.")
+            egui::RichText::new(crate::sys::tr("처음이시군요. 본인의 Claude API 키를 넣어 주세요.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고 다른 곳으로 보내지지 않습니다.", "First time here. Enter your own Claude API key.\nIt is saved only to key.txt in this program's folder and sent nowhere else."))
                 .size(12.5)
                 .color(ui::DIM()),
         );

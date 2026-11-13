@@ -34,6 +34,11 @@ pub fn base_dir() -> PathBuf {
 /// 대화 언어가 영어인가. 처음에는 한국어, 바꾸면 data/lang.txt 에 남는다.
 static ENGLISH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 화면의 글자를 고른다: 대화 언어가 영어이면 영어, 아니면 한국어.
+pub fn tr(ko: &'static str, en: &'static str) -> &'static str {
+    if english() { en } else { ko }
+}
+
 pub fn english() -> bool {
     ENGLISH.load(std::sync::atomic::Ordering::Relaxed)
 }

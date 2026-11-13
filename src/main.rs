@@ -184,6 +184,7 @@ struct App {
     /// 이번 턴에 AI 가 한마디(say)를 했는가
     pub turn_said: bool,
     probe: Option<Probe>,
+    gif: Option<Gif>,
     /// 초기화를 한 번 눌러 확인을 기다리는 중이면 그 시각
     pub reset_armed: Option<std::time::Instant>,
     /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
@@ -212,6 +213,58 @@ struct Probe {
     tx: Sender<String>,
     got: Receiver<String>,
     best: String,
+}
+
+/// 확인·소개용 녹화: 화면을 일정 간격으로 찍어 GIF 로 만든다 (LYBOARD_GIF=파일.gif).
+/// 찍은 그림은 바로 뒤쪽 스레드로 보내 한 장씩 GIF 에 적는다 (메모리에 쌓아 두지 않는다).
+struct Gif {
+    tx: Option<Sender<(f64, usize, usize, Vec<u8>)>>,
+    began: std::time::Instant,
+    last: std::time::Instant,
+    /// 마지막으로 무슨 일이 있었던 때 (이 뒤로 조용하면 녹화를 끝낸다)
+    busy_at: std::time::Instant,
+    /// 화면 내용이 바뀐 것을 알아보는 값과, 바뀐 뒤 촘촘히 찍을 시한
+    sig: (usize, usize, u64, usize, bool),
+    hot_until: std::time::Instant,
+}
+
+/// 찍힌 그림을 받아 GIF 로 적는 스레드. 가로 `width` 로 줄이고, 앞 장과 같은 그림은 버리고, 긴 멈춤은 줄인다.
+fn gif_writer(path: String, width: u32) -> Sender<(f64, usize, usize, Vec<u8>)> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let (tx, rx) = channel::<(f64, usize, usize, Vec<u8>)>();
+    std::thread::spawn(move || {
+        let Ok(file) = std::fs::File::create(&path) else { return };
+        let mut enc = GifEncoder::new_with_speed(std::io::BufWriter::new(file), 10);
+        let _ = enc.set_repeat(Repeat::Infinite);
+        let mut held: Option<(f64, image::RgbaImage)> = None;
+        let write = |enc: &mut GifEncoder<std::io::BufWriter<std::fs::File>>, img: image::RgbaImage, secs: f64| {
+            // 아무 일도 없는 구간은 0.7초로 줄인다 (기다리는 시간이 길면 보기 지루하다).
+            let ms = (secs * 1000.0).clamp(60.0, 700.0) as u64;
+            let frame = image::Frame::from_parts(img, 0, 0, image::Delay::from_saturating_duration(std::time::Duration::from_millis(ms)));
+            let _ = enc.encode_frame(frame);
+        };
+        while let Ok((t, w, h, rgba)) = rx.recv() {
+            let Some(full) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) else { continue };
+            let height = (h as f32 * width as f32 / w as f32).round() as u32;
+            let small = image::imageops::resize(&full, width, height, image::imageops::FilterType::Triangle);
+            match held.take() {
+                Some((t0, prev)) if prev.as_raw() == small.as_raw() => held = Some((t0, prev)),
+                Some((t0, prev)) => {
+                    write(&mut enc, prev, t - t0);
+                    held = Some((t, small));
+                }
+                None => held = Some((t, small)),
+            }
+        }
+        if let Some((_, last)) = held {
+            // 마지막 장면은 2.5초 머문다.
+            let frame = image::Frame::from_parts(last, 0, 0, image::Delay::from_saturating_duration(std::time::Duration::from_millis(2500)));
+            let _ = enc.encode_frame(frame);
+        }
+        drop(enc);
+        let _ = std::fs::write(format!("{path}.done"), "done");
+    });
+    tx
 }
 
 struct Web {
@@ -323,6 +376,11 @@ impl App {
             pics: Vec::new(),
             reset_armed: None,
             probe: None,
+            gif: std::env::var("LYBOARD_GIF").ok().map(|path| {
+                let now = std::time::Instant::now();
+                let width = std::env::var("LYBOARD_GIF_WIDTH").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
+                Gif { tx: Some(gif_writer(path, width)), began: now, last: now, busy_at: now, sig: (0, 0, 0, 0, false), hot_until: now }
+            }),
             stop: Default::default(),
             turn_said: false,
             queue: Default::default(),
@@ -389,48 +447,12 @@ impl App {
         // 확인용: LYBOARD_INPUT="drag 700 400 -900 0;wheel 700 400 -600;drag …" 처럼 주면 그 마우스 동작을 프로그램 안에서 흉내 낸다.
         // 동작 하나가 끝나고 화면이 가라앉을 때마다 보는 범위를 data\view.log 에 남긴다.
         if let Ok(script) = std::env::var("LYBOARD_INPUT") {
-            let m = egui::Modifiers::NONE;
             let idle = |q: &mut std::collections::VecDeque<Vec<egui::Event>>, n: usize| (0..n).for_each(|_| q.push_back(Vec::new()));
             idle(&mut app.fake_input, 120);
             app.fake_marks.push_back((app.fake_input.len(), "시작".into()));
             for step in script.split(';').map(str::trim).filter(|s| !s.is_empty()) {
-                let w: Vec<&str> = step.split_whitespace().collect();
-                let n: Vec<f32> = w.iter().skip(1).filter_map(|x| x.parse().ok()).collect();
-                let q = &mut app.fake_input;
-                match (w.first().copied(), n.as_slice()) {
-                    (Some("drag"), [x, y, dx, dy]) => {
-                        let p = egui::pos2(*x, *y);
-                        q.push_back(vec![egui::Event::PointerMoved(p)]);
-                        q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
-                        for i in 1..=20 {
-                            q.push_back(vec![egui::Event::PointerMoved(p + egui::vec2(*dx, *dy) * (i as f32 / 20.0))]);
-                        }
-                        idle(q, 12);
-                        app.fake_marks.push_back((q.len(), format!("{step} (누르고 있는 중)")));
-                        q.push_back(vec![egui::Event::PointerButton { pos: p + egui::vec2(*dx, *dy), button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
-                    }
-                    (Some("click"), [x, y]) => {
-                        // 짧게 눌렀다 뗀다 (오래 누르면 클릭으로 치지 않는다)
-                        let p = egui::pos2(*x, *y);
-                        q.push_back(vec![egui::Event::PointerMoved(p)]);
-                        q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
-                        q.push_back(Vec::new());
-                        q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
-                    }
-                    (Some("type"), _) => {
-                        // 글자 입력: "type 12" (앞서 누른 칸에 들어간다)
-                        q.push_back(vec![egui::Event::Text(step.trim_start_matches("type").trim().to_string())]);
-                    }
-                    (Some("wheel"), [x, y, amount]) => {
-                        q.push_back(vec![egui::Event::PointerMoved(egui::pos2(*x, *y))]);
-                        for _ in 0..10 {
-                            q.push_back(vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, *amount / 10.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: m }]);
-                        }
-                    }
-                    _ => {}
-                }
-                idle(q, 150);
-                app.fake_marks.push_back((q.len(), format!("{step} (손 뗀 뒤)")));
+                app.queue_fake(step);
+                app.fake_marks.push_back((app.fake_input.len(), format!("{step} (손 뗀 뒤)")));
             }
         }
         // 확인용: LYBOARD_PROBE=주소 로 주면 그 페이지를 보이지 않는 창으로 읽어 data\probe.log 에 남긴다.
@@ -487,11 +509,11 @@ impl App {
             .cards
             .iter()
             .filter(|c| c.id.starts_with("job") && c.kind == core::Kind::Progress && c.fields.get("pct").map(|p| p != "100").unwrap_or(true))
-            .filter(|c| c.fields.get("text").map(|t| !t.starts_with("멈춤") && !t.starts_with("실패")).unwrap_or(true))
+            .filter(|c| c.fields.get("text").map(|t| !t.starts_with("멈춤") && !t.starts_with("실패") && !t.starts_with("Stopped") && !t.starts_with("Failed")).unwrap_or(true))
             .map(|c| c.id.clone())
             .collect();
         for id in stale {
-            self.apply_line(&format!("set {id} text 멈춤: 프로그램이 꺼져서 끝내지 못함"), Author::Ai);
+            self.apply_line(&format!("set {id} text {}", sys::tr("멈춤: 프로그램이 꺼져서 끝내지 못함", "Stopped: the program was closed before it finished")), Author::Ai);
         }
         self.focus_input = true;
     }
@@ -584,22 +606,22 @@ impl App {
                 ("set", Some(core::Kind::Decision)) if third == "chosen" => {
                     let option = line.split_whitespace().nth(3).unwrap_or("");
                     let name = card.and_then(|c| c.items.iter().find(|(i, _)| i == option)).map(|(_, c)| c[0].clone()).unwrap_or_else(|| option.to_string());
-                    parts.push(format!("선택: {name}"));
+                    parts.push(format!("{}: {name}", sys::tr("선택", "Chose")));
                 }
                 ("upd", Some(core::Kind::Input)) if cells.len() >= 3 => parts.push(format!("{}: {}", cells[0], cells[2])),
-                ("upd", Some(core::Kind::Checklist)) if cells.len() >= 2 => parts.push(format!("{}: {}", if cells[0] == "done" { "체크" } else { "체크 해제" }, cells[1])),
+                ("upd", Some(core::Kind::Checklist)) if cells.len() >= 2 => parts.push(format!("{}: {}", if cells[0] == "done" { sys::tr("체크", "Checked") } else { sys::tr("체크 해제", "Unchecked") }, cells[1])),
                 ("set", Some(core::Kind::Input)) => {}
-                ("restore", _) => parts.push("보관함에서 꺼냄".to_string()),
+                ("restore", _) => parts.push(sys::tr("보관함에서 꺼냄", "Brought back from the shelf").to_string()),
                 _ => {}
             }
         }
-        if parts.is_empty() { format!("(화면에서 직접 조작) {}", self.turn_events) } else { format!("({})", parts.join(" · ")) }
+        if parts.is_empty() { format!("({}) {}", sys::tr("화면에서 직접 조작", "on the board"), self.turn_events) } else { format!("({})", parts.join(" · ")) }
     }
 
     /// 초기화: 화면, 대화, 기억, 기록을 전부 지우고 처음 상태로 돌아간다. API 키와 음성 설정만 남는다. 되돌릴 수 없다.
     pub fn reset_all(&mut self) {
         if self.busy || jobs::running() > 0 {
-            self.error = Some("답하는 중이거나 작업자가 일하는 중에는 초기화할 수 없습니다. 끝난 뒤에 다시 눌러 주세요.".into());
+            self.error = Some(sys::tr("답하는 중이거나 작업자가 일하는 중에는 초기화할 수 없습니다. 끝난 뒤에 다시 눌러 주세요.", "Cannot reset while it is answering or a worker is running. Try again when they finish.").into());
             return;
         }
         self.flush_speech();
@@ -645,10 +667,56 @@ impl App {
         self.start_real_mode(); // 빈 보드와 빈 기억으로 다시 시작한다
     }
 
+    /// 흉내 낸 마우스·글자 입력 한 걸음을 줄 세운다 ("click 230 190", "drag x y dx dy", "wheel x y 줄수", "type 글").
+    fn queue_fake(&mut self, step: &str) {
+        let m = egui::Modifiers::NONE;
+        let w: Vec<&str> = step.split_whitespace().collect();
+        let n: Vec<f32> = w.iter().skip(1).filter_map(|x| x.parse().ok()).collect();
+        let q = &mut self.fake_input;
+        match (w.first().copied(), n.as_slice()) {
+            (Some("drag"), [x, y, dx, dy]) => {
+                let p = egui::pos2(*x, *y);
+                q.push_back(vec![egui::Event::PointerMoved(p)]);
+                q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+                for i in 1..=20 {
+                    q.push_back(vec![egui::Event::PointerMoved(p + egui::vec2(*dx, *dy) * (i as f32 / 20.0))]);
+                }
+                for _ in 0..12 {
+                    q.push_back(Vec::new());
+                }
+                q.push_back(vec![egui::Event::PointerButton { pos: p + egui::vec2(*dx, *dy), button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+            }
+            (Some("click"), [x, y]) => {
+                // 짧게 눌렀다 뗀다 (오래 누르면 클릭으로 치지 않는다)
+                let p = egui::pos2(*x, *y);
+                q.push_back(vec![egui::Event::PointerMoved(p)]);
+                for _ in 0..6 {
+                    q.push_back(Vec::new());
+                }
+                q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: m }]);
+                q.push_back(Vec::new());
+                q.push_back(vec![egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: m }]);
+            }
+            (Some("type"), _) => {
+                q.push_back(vec![egui::Event::Text(step.trim_start_matches("type").trim().to_string())]);
+            }
+            (Some("wheel"), [x, y, amount]) => {
+                q.push_back(vec![egui::Event::PointerMoved(egui::pos2(*x, *y))]);
+                for _ in 0..10 {
+                    q.push_back(vec![egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, *amount / 10.0), phase: egui::TouchPhase::Move, source: egui::MouseWheelSource::Wheel, modifiers: m }]);
+                }
+            }
+            _ => {}
+        }
+        for _ in 0..90 {
+            q.push_back(Vec::new());
+        }
+    }
+
     /// 사진 하나를 입력창에 붙인다.
     pub fn add_pic(&mut self, ctx: &egui::Context, pic: Result<pics::Pic, String>) {
         match pic {
-            Ok(_) if self.pics.len() >= 6 => self.error = Some("사진은 한 번에 6장까지 붙일 수 있습니다".into()),
+            Ok(_) if self.pics.len() >= 6 => self.error = Some(sys::tr("사진은 한 번에 6장까지 붙일 수 있습니다", "Up to six pictures at a time").into()),
             Ok(p) => {
                 let small = egui::ColorImage::from_rgba_unmultiplied([p.thumb.0, p.thumb.1], &p.thumb.2);
                 let tex = ctx.load_texture(format!("pic{}", self.pics.len()), small, Default::default());
@@ -881,7 +949,7 @@ impl App {
         if input.is_empty() && self.pics.is_empty() {
             return;
         }
-        let input = if input.is_empty() { "(사진을 보냄)".to_string() } else { input };
+        let input = if input.is_empty() { sys::tr("(사진을 보냄)", "(sent pictures)").to_string() } else { input };
         self.input.clear();
         self.start_turn(ctx, input);
     }
@@ -910,7 +978,7 @@ impl App {
         if !images.is_empty() {
             text += &format!("\n<images>\n사용자가 이번 말에 사진 {}장을 붙였다 (이 메시지 앞에 들어 있다). 저장된 곳:\n{}\n</images>", images.len(), saved.join("\n"));
         }
-        let pics_note = if images.is_empty() { String::new() } else { format!("(사진 {}장) ", images.len()) };
+        let pics_note = if images.is_empty() { String::new() } else { if sys::english() { format!("({} pictures) ", images.len()) } else { format!("(사진 {}장) ", images.len()) } };
         if std::env::var("LYBOARD_DEBUG").is_ok() {
             debug_log("turn.log", &format!("{text}\n=====\n")); // 확인용: 모델에게 보낸 것 그대로
         }
@@ -919,9 +987,9 @@ impl App {
         self.error = None;
         let auto = input.is_empty(); // 사용자가 말한 것이 아니라 프로그램이 시작한 턴
         self.cur_input = if let Some(names) = &self.job_turn {
-            format!("(맡긴 작업이 끝남) {names}")
+            format!("({}) {names}", sys::tr("맡긴 작업이 끝남", "delegated work finished"))
         } else if self.tidying {
-            "(분류와 주제 정리)".to_string()
+            sys::tr("(분류와 주제 정리)", "(tidying topics)").to_string()
         } else if auto {
             self.events_label()
         } else {
@@ -1206,14 +1274,14 @@ impl App {
                     Some(t) => t,
                     None => {
                         if !self.board.topics.iter().any(|t| t.id == "jobs") {
-                            self.apply_line("topic jobs 맡긴 작업", Author::Ai);
+                            self.apply_line(sys::tr("topic jobs 맡긴 작업", "topic jobs Delegated work"), Author::Ai);
                         }
                         "jobs".to_string()
                     }
                 };
                 self.apply_line(&format!("card {id} progress {topic} 3x2 {}", clip(&title, 40)), Author::Ai);
                 self.apply_line(&format!("set {id} pct 0"), Author::Ai);
-                self.apply_line(&format!("set {id} text 작업자가 시작함"), Author::Ai);
+                self.apply_line(&format!("set {id} text {}", sys::tr("작업자가 시작함", "Worker started")), Author::Ai);
             }
             jobs::Event::Progress { id, pct, text } => {
                 if self.board.card(&id).is_none() {
@@ -1230,9 +1298,9 @@ impl App {
                 if self.board.card(&id).is_some() {
                     if ok {
                         self.apply_line(&format!("set {id} pct 100"), Author::Ai);
-                        self.apply_line(&format!("set {id} text 끝남 · 결과를 정리하는 중"), Author::Ai);
+                        self.apply_line(&format!("set {id} text {}", sys::tr("끝남 · 결과를 정리하는 중", "Done · writing up the result")), Author::Ai);
                     } else {
-                        self.apply_line(&format!("set {id} text 실패: 끝내지 못함"), Author::Ai);
+                        self.apply_line(&format!("set {id} text {}", sys::tr("실패: 끝내지 못함", "Failed: could not finish")), Author::Ai);
                     }
                 }
                 self.job_news.push((id, title, ok, report));
@@ -1375,7 +1443,7 @@ impl App {
                 llm::Msg::Error(e) if e == agent::STOPPED => {
                     // 사용자가 멈춘 것은 오류가 아니다.
                     self.queue.lock().unwrap_or_else(|e| e.into_inner()).clear();
-                    self.apply_line("say 멈췄어요.", Author::Ai);
+                    self.apply_line(sys::tr("say 멈췄어요.", "say Stopped."), Author::Ai);
                     self.finish_turn();
                 }
                 llm::Msg::Error(e) => {
@@ -1451,7 +1519,7 @@ impl App {
                 }
                 Ok(Err(e)) => {
                     self.stt = None;
-                    self.error = Some(format!("받아쓰기 실패: {e}"));
+                    self.error = Some(format!("{}: {e}", sys::tr("받아쓰기 실패", "Transcription failed")));
                 }
                 Err(_) => ctx.request_repaint_after(std::time::Duration::from_millis(50)),
             }
@@ -1474,7 +1542,7 @@ impl App {
             None => {}
             Some(mic) => {
                 if let Some(e) = mic.error() {
-                    self.error = Some(format!("마이크를 쓸 수 없음: {e}"));
+                    self.error = Some(format!("{}: {e}", sys::tr("마이크를 쓸 수 없음", "Microphone unavailable")));
                     self.converse = false;
                     self.mic = None;
                     return;
@@ -1634,27 +1702,27 @@ impl App {
     fn status_line(&self) -> String {
         let mut parts = Vec::new();
         if self.cfg.demo() {
-            parts.push(if std::env::var("LYBOARD_DEMO").is_ok() { "시연 모드 · 무엇을 입력해도 준비된 장면이 재생됩니다" } else { "API 키를 넣으면 시작합니다" }.to_string());
+            parts.push(if std::env::var("LYBOARD_DEMO").is_ok() { sys::tr("시연 모드 · 무엇을 입력해도 준비된 장면이 재생됩니다", "Demo mode · any input plays the prepared scenes") } else { sys::tr("API 키를 넣으면 시작합니다", "Enter an API key to start") }.to_string());
         }
         if let Some(s) = &self.stats {
             parts.push(s.model.clone());
-            parts.push(format!("첫 반응 {:.1}초 · 전체 {:.1}초", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0));
+            parts.push(if sys::english() { format!("first {:.1}s · total {:.1}s", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0) } else { format!("첫 반응 {:.1}초 · 전체 {:.1}초", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0) });
             if s.input_tokens > 0 {
-                parts.push(format!("입력 {} (캐시 {}) · 출력 {} 토큰", s.input_tokens, s.cached_tokens, s.output_tokens));
+                parts.push(if sys::english() { format!("in {} (cached {}) · out {} tokens", s.input_tokens, s.cached_tokens, s.output_tokens) } else { format!("입력 {} (캐시 {}) · 출력 {} 토큰", s.input_tokens, s.cached_tokens, s.output_tokens) });
             }
         }
         let text: usize = self.board.cards.iter().map(card_chars).sum();
-        parts.push(format!("카드 {} · 화면 글자 {}", self.board.cards.len(), text));
+        parts.push(if sys::english() { format!("{} cards · {} characters", self.board.cards.len(), text) } else { format!("카드 {} · 화면 글자 {}", self.board.cards.len(), text) });
         let workers = jobs::running();
         if workers > 0 {
-            parts.push(format!("작업자 {workers}명이 일하는 중"));
+            parts.push(if sys::english() { format!("{workers} workers running") } else { format!("작업자 {workers}명이 일하는 중") });
         }
-        parts.push(format!("확대 {:.0}% (스크롤로 확대·축소, 빈 곳을 끌어 이동, 두 번 눌러 전체 보기)", self.view.zoom * 100.0));
+        parts.push(if sys::english() { format!("zoom {:.0}% (scroll to zoom, drag empty space to move, double-click to see all)", self.view.zoom * 100.0) } else { format!("확대 {:.0}% (스크롤로 확대·축소, 빈 곳을 끌어 이동, 두 번 눌러 전체 보기)", self.view.zoom * 100.0) });
         if !self.rejects.is_empty() {
-            parts.push(format!("거부된 명령 {}", self.rejects.len()));
+            parts.push(format!("{} {}", sys::tr("거부된 명령", "rejected commands"), self.rejects.len()));
         }
         if let Some(s) = &self.selected {
-            parts.push(format!("선택: {s}"));
+            parts.push(format!("{}: {s}", sys::tr("선택", "selected")));
         }
         parts.join("   ·   ")
     }
@@ -1718,6 +1786,38 @@ impl eframe::App for App {
         if self.shot_sent.map(|t| t.elapsed().as_millis() < 1500).unwrap_or(false) {
             ui.ctx().request_repaint();
         }
+        // 녹화: 0.11초마다 화면을 찍는다. 할 일이 다 끝나고 2.5초 조용하면 끝낸다 (길어도 3분).
+        if let Some(g) = &mut self.gif {
+            let talking = self.tts.is_speaking() || !self.speech.is_empty();
+            if self.busy || talking || self.react_at.is_some() || !self.autoplay.is_empty() || !self.job_news.is_empty() || !self.fake_input.is_empty() || self.probe.is_some() {
+                g.busy_at = std::time::Instant::now();
+            }
+            let over = g.began.elapsed().as_secs() > 180 || (g.began.elapsed().as_secs() >= 4 && g.busy_at.elapsed().as_millis() > 2500);
+            if over {
+                g.tx = None; // 보내는 쪽을 닫으면 적는 스레드가 마무리한다
+            } else if {
+                // 화면이 바뀌는 동안(과 그 뒤 1.6초의 전환)은 촘촘히, 기다리는 동안은 드문드문 찍는다.
+                let sig = (self.turn_raw.len(), self.board.cards.len(), self.board.cards.iter().map(|c| c.rev).sum::<u64>(), self.recent.len() + self.board.say.len(), self.busy);
+                if sig != g.sig {
+                    g.sig = sig;
+                    g.hot_until = std::time::Instant::now() + std::time::Duration::from_millis(1600);
+                }
+                let gap = if std::time::Instant::now() < g.hot_until || !self.fake_input.is_empty() { 130 } else { 1500 };
+                g.last.elapsed().as_millis() >= gap
+            } {
+                g.last = std::time::Instant::now();
+                if let Some(tx) = g.tx.clone() {
+                    let t = g.began.elapsed().as_secs_f64();
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |img| {
+                        let rgba: Vec<u8> = img.pixels.iter().flat_map(|p| p.to_array()).collect();
+                        let _ = tx.send((t, img.size[0], img.size[1], rgba));
+                    })));
+                }
+            }
+            if g.tx.is_some() {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+            }
+        }
         self.pump();
         let ctx = ui.ctx().clone();
         if !self.titlebar_done {
@@ -1771,7 +1871,11 @@ impl eframe::App for App {
             if !self.busy && !talking && self.job_news.is_empty() && self.idle_since.elapsed().as_millis() > 1200 {
                 // 확인용 대본에서는 "|" 가 입력 구분자라서, 조작 줄 안의 "|" 는 "¦" 로 적는다.
                 let next = self.autoplay.pop_front().unwrap_or_default().replace('¦', "|");
-                if let Some(line) = next.strip_prefix('!') {
+                if let Some(step) = next.strip_prefix('@') {
+                    // "@" 로 시작하면 마우스·글자 입력을 흉내 낸다 (앞의 턴이 끝난 뒤에 실행된다).
+                    self.queue_fake(step);
+                    self.idle_since = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                } else if let Some(line) = next.strip_prefix('!') {
                     // "!" 로 시작하면 입력이 아니라 사용자의 화면 조작으로 넣는다 (클릭을 흉내 내는 확인용).
                     // 한 번의 조작이 여러 줄이면 ⏎ 로 이어 적는다 (입력 카드의 보내기처럼).
                     for l in line.split('⏎') {
@@ -1859,7 +1963,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(title())
-            .with_inner_size([1560.0, 920.0])
+            // 확인용: 창의 크기 (LYBOARD_SIZE="가로,세로")
+            .with_inner_size(std::env::var("LYBOARD_SIZE").ok().and_then(|v| v.split_once(',').and_then(|(w, h)| Some([w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?]))).unwrap_or([1560.0, 920.0]))
             .with_active(!quiet)
             // 확인용: 창을 띄울 위치 (LYBOARD_POS="x,y")
             .with_position(std::env::var("LYBOARD_POS").ok().and_then(|v| v.split_once(',').and_then(|(x, y)| Some([x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?]))).unwrap_or([80.0, 60.0])),
