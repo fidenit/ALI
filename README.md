@@ -4,11 +4,11 @@
 
 > A screen full of text is the worst way to use AI.
 
-We built an extraordinary engine and bolted it to a wooden cart.
+Humanity built an extraordinary engine and bolted it to a wooden cart.
 
 Every answer comes back as a scroll of paragraphs. Most of it goes unread. The chat window, a tool made for people typing to each other, became the place where we work with a machine that can do far more than type.
 
-We have already built many excellent project and collaboration tools. Yet with AI we went back to plain text. And those tools are too complex, with features spread too wide, to be the place where you talk to an AI.
+People have already built many excellent project and collaboration tools: Jira, monday.com, Asana, Notion, Trello. Yet in front of AI, all of us went back to plain text. And those tools are too complex, with features spread too wide, to be the place where you talk to an AI.
 
 What we want is one place. Every conversation and every topic lives there, shown as the information you actually need, shaped so it reads at a glance, in an interface that adapts as you speak. No tsunami of text.
 
@@ -16,7 +16,7 @@ ALI is that place. You say what you need, and the AI arranges the screen for you
 
 Nothing like it existed, so we built it. We hope it makes working with AI less tiring and more productive for everyone.
 
-![ALI: a workshop planned in one request. The route, schedule, budget and checklist are on the board; the question that needs an answer has come to the left.](docs/images/hero.png)
+![ALI by FIDENIT: a wall of text gives way to a live board. One request plans a workshop; the route, schedule, budget and checklist appear, and the one decision that needs you comes to the left.](docs/images/hero.gif)
 
 ## What is different
 

@@ -185,6 +185,7 @@ struct App {
     pub turn_said: bool,
     probe: Option<Probe>,
     gif: Option<Gif>,
+    promo: Option<Promo>,
     /// 초기화를 한 번 눌러 확인을 기다리는 중이면 그 시각
     pub reset_armed: Option<std::time::Instant>,
     /// 입력창에 붙여 둔 사진 (보내면 이번 말과 함께 간다)
@@ -265,6 +266,119 @@ fn gif_writer(path: String, width: u32) -> Sender<(f64, usize, usize, Vec<u8>)> 
         let _ = std::fs::write(format!("{path}.done"), "done");
     });
     tx
+}
+
+/// 소개 영상용 장면 (LYBOARD_PROMO=로고 그림 파일). 실제 화면 위에 여는 장면과 닫는 장면을 덧그린다.
+/// 여는 장면: 글자의 벽 → 한 문장 → 로고. 그 뒤 실제 화면이 드러나 시연이 돈다. 시연이 끝나면 닫는 장면.
+struct Promo {
+    logo: String,
+    began: std::time::Instant,
+    outro: Option<std::time::Instant>,
+}
+
+/// 여는 장면이 화면을 덮고 있는 시간 (초). 이 뒤에 시연이 시작된다.
+const PROMO_INTRO: f32 = 5.9;
+const PROMO_OUTRO: f32 = 4.6;
+
+impl App {
+    /// 소개 장면이 아직 움직이고 있는가 (녹화가 이 동안 끝나지 않게 한다).
+    fn promo_moving(&self) -> bool {
+        match &self.promo {
+            Some(p) => p.began.elapsed().as_secs_f32() < PROMO_INTRO + 0.3 || p.outro.map(|o| o.elapsed().as_secs_f32() < PROMO_OUTRO).unwrap_or(true),
+            None => false,
+        }
+    }
+
+    fn promo_frame(&mut self, ctx: &egui::Context, talking: bool) {
+        let idle = self.autoplay.is_empty() && !self.busy && !talking && self.react_at.is_none() && self.fake_input.is_empty() && self.idle_since.elapsed().as_millis() > 1800;
+        let Some(p) = &mut self.promo else { return };
+        let t = p.began.elapsed().as_secs_f32();
+        if p.outro.is_none() && t > PROMO_INTRO + 2.0 && idle {
+            p.outro = Some(std::time::Instant::now());
+        }
+        let screen = ctx.content_rect();
+        let paint = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("promo")));
+        let c = screen.center();
+        let fade = |x: f32, a: f32, b: f32| ((x - a) / (b - a)).clamp(0.0, 1.0);
+        let back = |x: f32| {
+            let (c1, c3) = (1.70158_f32, 2.70158_f32);
+            1.0 + c3 * (x - 1.0).powi(3) + c1 * (x - 1.0).powi(2)
+        };
+        let logo = crate::pics::show(ctx, &p.logo);
+        let text = |pos: egui::Pos2, s: &str, font: egui::FontId, color: egui::Color32, a: f32| {
+            if a > 0.01 {
+                paint.text(pos, egui::Align2::CENTER_CENTER, s, font, color.gamma_multiply(a));
+            }
+        };
+        // 글자 사이를 벌려서 적는다 (로고 옆의 이름처럼).
+        let spaced = |pos: egui::Pos2, s: &str, size: f32, gap: f32, color: egui::Color32, a: f32| {
+            let n = s.chars().count() as f32;
+            for (i, ch) in s.chars().enumerate() {
+                let x = pos.x + (i as f32 - (n - 1.0) / 2.0) * gap;
+                text(egui::pos2(x, pos.y), &ch.to_string(), ui::bold(size), color, a);
+            }
+        };
+
+        if t < PROMO_INTRO + 0.1 {
+            let cover = 1.0 - fade(t, PROMO_INTRO - 0.6, PROMO_INTRO);
+            paint.rect_filled(screen, 0.0, ui::BG().gamma_multiply(cover));
+            // 글자의 벽: 문단처럼 보이는 회색 줄들이 위로 흘러간다. 그러다 한가운데로 빨려 들어가 사라진다.
+            let wall = fade(t, 0.0, 0.5) * (1.0 - fade(t, 2.9, 3.3));
+            let pull = ui::ease_out_cubic(fade(t, 2.5, 3.3));
+            if wall > 0.01 {
+                let rows = 40;
+                let pitch = 22.0;
+                for row in 0..rows {
+                    let y = screen.top() - pitch + (row as f32 * pitch - t * 120.0).rem_euclid(rows as f32 * pitch);
+                    let mut seed = (row as u32).wrapping_mul(2_654_435_761).wrapping_add(12_345);
+                    let mut x = screen.left() + 70.0;
+                    // 문단의 마지막 줄은 짧게 끝난다.
+                    let end = screen.right() - 70.0 - if row % 6 == 5 { screen.width() * 0.45 } else { 0.0 };
+                    while x < end {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        let w = 22.0 + (seed >> 24) as f32 * 0.32;
+                        let r = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w.min(end - x), 9.0));
+                        let r = egui::Rect::from_center_size(r.center().lerp(c, pull), r.size() * (1.0 - pull));
+                        paint.rect_filled(r, 3.0, ui::DIM().gamma_multiply(0.30 * wall * cover));
+                        x += w + 9.0;
+                    }
+                }
+            }
+            // 한 문장
+            let say = fade(t, 0.6, 1.1) * (1.0 - fade(t, 2.4, 2.9));
+            if say > 0.01 {
+                let plate = egui::Rect::from_center_size(c, egui::vec2(660.0, 150.0));
+                paint.rect_filled(plate, 28.0, ui::BG().gamma_multiply(0.92 * say));
+                text(c - egui::vec2(0.0, 24.0), "A screen full of text", ui::bold(38.0), ui::TEXT(), say);
+                text(c + egui::vec2(0.0, 26.0), "is the worst way to use AI.", ui::bold(38.0), ui::TEXT(), say);
+            }
+            // 로고와 이름
+            let mark = fade(t, 3.1, 3.6) * cover;
+            if let crate::pics::Shown::Ready(id, size) = logo {
+                let h = screen.height() * 0.26 * (0.80 + 0.20 * back(fade(t, 3.1, 3.8)));
+                let r = egui::Rect::from_center_size(c - egui::vec2(0.0, 56.0), egui::vec2(h * size[0] / size[1], h));
+                paint.image(id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE.gamma_multiply(mark));
+            }
+            spaced(c + egui::vec2(0.0, 84.0), "FIDENIT", 26.0, 25.0, ui::TEXT(), fade(t, 3.7, 4.2) * cover);
+            text(c + egui::vec2(0.0, 126.0), "presents  ALI  ·  Adaptive Live Interface", ui::font(15.0), ui::DIM(), fade(t, 4.2, 4.7) * cover);
+        }
+
+        if let Some(o) = p.outro {
+            let u = o.elapsed().as_secs_f32();
+            paint.rect_filled(screen, 0.0, ui::BG().gamma_multiply(0.96 * fade(u, 0.0, 0.6)));
+            if let crate::pics::Shown::Ready(id, size) = crate::pics::show(ctx, &p.logo) {
+                let h = 86.0;
+                let r = egui::Rect::from_center_size(c - egui::vec2(0.0, 150.0), egui::vec2(h * size[0] / size[1], h));
+                paint.image(id, r, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE.gamma_multiply(fade(u, 0.3, 0.8)));
+            }
+            text(c - egui::vec2(0.0, 44.0), "ALI", ui::bold(88.0 * (0.92 + 0.08 * back(fade(u, 0.5, 1.2)))), ui::TEXT(), fade(u, 0.5, 1.0));
+            text(c + egui::vec2(0.0, 30.0), "Adaptive Live Interface", ui::font(19.0), ui::DIM(), fade(u, 0.8, 1.3));
+            text(c + egui::vec2(0.0, 92.0), "Less reading. More done.", ui::bold(25.0), ui::TEXT(), fade(u, 1.2, 1.7));
+            spaced(egui::pos2(c.x, screen.bottom() - 64.0), "FIDENIT", 15.0, 15.0, ui::DIM(), fade(u, 1.6, 2.1));
+            text(egui::pos2(c.x, screen.bottom() - 38.0), "for the world", ui::font(12.5), ui::FAINT(), fade(u, 1.8, 2.3));
+        }
+        ctx.request_repaint();
+    }
 }
 
 struct Web {
@@ -376,6 +490,7 @@ impl App {
             pics: Vec::new(),
             reset_armed: None,
             probe: None,
+            promo: std::env::var("LYBOARD_PROMO").ok().map(|logo| Promo { logo, began: std::time::Instant::now(), outro: None }),
             gif: std::env::var("LYBOARD_GIF").ok().map(|path| {
                 let now = std::time::Instant::now();
                 let width = std::env::var("LYBOARD_GIF_WIDTH").ok().and_then(|v| v.parse().ok()).unwrap_or(900);
@@ -1701,10 +1816,10 @@ impl App {
 
     fn status_line(&self) -> String {
         let mut parts = Vec::new();
-        if self.cfg.demo() {
+        if self.cfg.demo() && self.promo.is_none() {
             parts.push(if std::env::var("LYBOARD_DEMO").is_ok() { sys::tr("시연 모드 · 무엇을 입력해도 준비된 장면이 재생됩니다", "Demo mode · any input plays the prepared scenes") } else { sys::tr("API 키를 넣으면 시작합니다", "Enter an API key to start") }.to_string());
         }
-        if let Some(s) = &self.stats {
+        if let Some(s) = self.stats.as_ref().filter(|_| self.promo.is_none()) {
             parts.push(s.model.clone());
             parts.push(if sys::english() { format!("first {:.1}s · total {:.1}s", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0) } else { format!("첫 반응 {:.1}초 · 전체 {:.1}초", s.first_ms as f32 / 1000.0, s.total_ms as f32 / 1000.0) });
             if s.input_tokens > 0 {
@@ -1787,9 +1902,10 @@ impl eframe::App for App {
             ui.ctx().request_repaint();
         }
         // 녹화: 0.11초마다 화면을 찍는다. 할 일이 다 끝나고 2.5초 조용하면 끝낸다 (길어도 3분).
+        let promo_moving = self.promo_moving();
         if let Some(g) = &mut self.gif {
             let talking = self.tts.is_speaking() || !self.speech.is_empty();
-            if self.busy || talking || self.react_at.is_some() || !self.autoplay.is_empty() || !self.job_news.is_empty() || !self.fake_input.is_empty() || self.probe.is_some() {
+            if self.busy || talking || self.react_at.is_some() || !self.autoplay.is_empty() || !self.job_news.is_empty() || !self.fake_input.is_empty() || self.probe.is_some() || promo_moving {
                 g.busy_at = std::time::Instant::now();
             }
             let over = g.began.elapsed().as_secs() > 180 || (g.began.elapsed().as_secs() >= 4 && g.busy_at.elapsed().as_millis() > 2500);
@@ -1802,7 +1918,7 @@ impl eframe::App for App {
                     g.sig = sig;
                     g.hot_until = std::time::Instant::now() + std::time::Duration::from_millis(1600);
                 }
-                let gap = if std::time::Instant::now() < g.hot_until || !self.fake_input.is_empty() { 130 } else { 1500 };
+                let gap = if std::time::Instant::now() < g.hot_until || !self.fake_input.is_empty() || promo_moving { 130 } else { 1500 };
                 g.last.elapsed().as_millis() >= gap
             } {
                 g.last = std::time::Instant::now();
@@ -1868,7 +1984,8 @@ impl eframe::App for App {
                 self.input = self.autoplay.pop_front().unwrap_or_default().trim_start_matches('+').to_string();
                 self.send(&ctx);
             }
-            if !self.busy && !talking && self.job_news.is_empty() && self.idle_since.elapsed().as_millis() > 1200 {
+            let intro_done = self.promo.as_ref().map(|p| p.began.elapsed().as_secs_f32() > PROMO_INTRO - 0.4).unwrap_or(true);
+            if intro_done && !self.busy && !talking && self.job_news.is_empty() && self.idle_since.elapsed().as_millis() > 1200 {
                 // 확인용 대본에서는 "|" 가 입력 구분자라서, 조작 줄 안의 "|" 는 "¦" 로 적는다.
                 let next = self.autoplay.pop_front().unwrap_or_default().replace('¦', "|");
                 if let Some(step) = next.strip_prefix('@') {
@@ -1921,6 +2038,7 @@ impl eframe::App for App {
                     ctx.request_repaint();
                 }
             });
+        self.promo_frame(&ctx, talking);
     }
 }
 

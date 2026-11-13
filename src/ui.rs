@@ -183,6 +183,9 @@ pub struct View {
     pub task_rect: Option<Rect>,
     /// 이 주제의 구역을 "내 차례" 자리 바로 옆에 붙여 보여 달라는 예약
     dock: Option<String>,
+    /// 지금 화면을 맞춰 둔 주제와 그때의 보는 범위. 그 구역의 크기가 바뀌면(카드가 늘거나 줄면) 다시 맞춘다.
+    /// 사용자가 손으로 화면을 옮기면 그만둔다.
+    docked: Option<(String, Rect)>,
     /// 이 카드가 제 크기(100%)로 화면 안에 다 들어오게 해 달라는 예약
     card_goto: Option<String>,
 }
@@ -273,80 +276,98 @@ struct Zone {
 /// 배치. 주제마다 구역을 하나씩 만들고, 카드는 자기 주제의 구역 안에서만 격자에 놓는다.
 /// 구역 안에서는 위치가 정해진 카드를 먼저 놓고 나머지를 빈 곳에 채운다.
 /// 화면이 넓으면 구역을 두 줄로 나란히 놓아 여러 주제가 한 화면에 보이게 한다.
-fn layout(board: &Board, width: f32, view: &View, only: Option<&str>, with_inbox: bool) -> (HashMap<String, Slot>, Vec<Zone>) {
+fn layout(board: &Board, width: f32, screen: Vec2, view: &View, only: Option<&str>, with_inbox: bool) -> (HashMap<String, Slot>, Vec<Zone>) {
     let cells = |avail: f32| (((avail - 2.0 * ZONE_PAD + GAP) / (CW + GAP)).floor() as i32).max(2);
     // 답이 필요한 카드(decision)는 주제 구역에 두지 않고 오른쪽 "내 차례" 구역으로 모은다.
     let asks: Vec<&Card> = board.cards.iter().filter(|c| view.task.as_deref() == Some(c.id.as_str())).collect();
     let away = |c: &Card| view.task.as_deref() == Some(c.id.as_str());
     let topics: Vec<&crate::core::Topic> =
         board.topics.iter().filter(|t| only.map(|g| t.group.as_deref().unwrap_or("") == g).unwrap_or(true)).filter(|t| board.cards.iter().any(|c| c.topic == t.id && !away(c))).collect();
-    let half = cells((width - ZONE_GAP) / 2.0);
-    let limit = if topics.len() >= 2 && half >= 4 { half } else { cells(width) };
+    // 한 주제의 카드는 스크롤 없이 한 화면에 들어와야 한다. 그래서 구역마다 가로 칸 수를 몇 가지로 놓아 보고,
+    // 화면에 가장 크게 들어오는 배치를 고른다. 칸을 늘리면 구역이 넓고 낮아져서, 조금 축소하면 통째로 보인다.
+    // 제 크기(100%)로 들어오면 그것이 가장 좋고, 아니면 FIT_MIN 까지 축소해서 들어오는 것을 찾는다.
+    let room = vec2((screen.x - 32.0).max(CW * 3.0), (screen.y - 32.0).max(CH * 2.0));
+    let (lo, hi) = (cells(room.x), cells(room.x / FIT_MIN));
 
     let mut slots = HashMap::new();
     let mut zones = Vec::new();
     let (mut x, mut y, mut shelf_h) = (0.0_f32, 0.0_f32, 0.0_f32);
     for t in topics {
-        let mut used: HashSet<(i32, i32)> = HashSet::new();
-        let mut placed: Vec<(&Card, i32, i32, i32, i32)> = Vec::new();
-        let width_of = |c: &Card| (c.w as i32).min(limit);
-        let occupy = |used: &mut HashSet<(i32, i32)>, col: i32, row: i32, w: i32, h: i32| {
-            for cx in col..col + w {
-                for cy in row..row + h {
-                    used.insert((cx, cy));
-                }
-            }
-        };
         let mine: Vec<&Card> = board.cards.iter().filter(|c| c.topic == t.id && !away(c)).collect();
-        for c in mine.iter().filter(|c| c.grid.is_some()) {
-            let (col, row) = c.grid.unwrap();
-            let (w, h) = (width_of(c), eff_h(c, view));
-            let col = col.min((limit - w).max(0));
-            occupy(&mut used, col, row, w, h);
-            placed.push((c, col, row, w, h));
-        }
-        // 자리가 정해지지 않은 카드는 중요한 것부터 놓는다 (세 단계로만 나눠서 작은 차이로 자리가 바뀌지 않게 한다).
-        let mut free: Vec<&&Card> = mine.iter().filter(|c| c.grid.is_none()).collect();
-        free.sort_by_key(|c| -((view.importance.get(&c.id).copied().unwrap_or(0.5) * 2.99) as i32));
-        for c in free {
-            let (w, h) = (width_of(c), eff_h(c, view));
-            let mut row = 0;
-            let (col, row) = 'find: loop {
-                for col in 0..=(limit - w) {
-                    if (col..col + w).all(|cx| (row..row + h).all(|cy| !used.contains(&(cx, cy)))) {
-                        break 'find (col, row);
+        // 가로 `limit` 칸으로 놓아 본다. (놓인 자리들, 쓴 가로 칸 수, 쓴 세로 칸 수)
+        let place = |limit: i32| -> (Vec<(&Card, i32, i32, i32, i32)>, i32, i32) {
+            let mut used: HashSet<(i32, i32)> = HashSet::new();
+            let mut placed: Vec<(&Card, i32, i32, i32, i32)> = Vec::new();
+            let width_of = |c: &Card| (c.w as i32).min(limit);
+            let occupy = |used: &mut HashSet<(i32, i32)>, col: i32, row: i32, w: i32, h: i32| {
+                for cx in col..col + w {
+                    for cy in row..row + h {
+                        used.insert((cx, cy));
                     }
                 }
-                row += 1;
             };
-            occupy(&mut used, col, row, w, h);
-            placed.push((c, col, row, w, h));
-        }
-        let ncols = placed.iter().map(|p| p.1 + p.3).max().unwrap_or(1);
-        let nrows = placed.iter().map(|p| p.2 + p.4).max().unwrap_or(1);
-        // 오른쪽에 빈 칸이 남은 카드는 그만큼 넓힌다 (구역 안에 구멍이 남지 않게). 사용자가 자리를 정한 카드는 그대로 둔다.
-        let mut order: Vec<usize> = (0..placed.len()).collect();
-        order.sort_by_key(|i| (placed[*i].2, placed[*i].1));
-        for i in order {
-            let (c, col, row, mut w, h) = placed[i];
-            if c.pinned || c.grid.is_some() {
-                continue;
+            for c in mine.iter().filter(|c| c.grid.is_some()) {
+                let (col, row) = c.grid.unwrap();
+                let (w, h) = (width_of(c), eff_h(c, view));
+                let col = col.min((limit - w).max(0));
+                occupy(&mut used, col, row, w, h);
+                placed.push((*c, col, row, w, h));
             }
-            while col + w < ncols && (row..row + h).all(|cy| !used.contains(&(col + w, cy))) {
-                for cy in row..row + h {
-                    used.insert((col + w, cy));
+            // 자리가 정해지지 않은 카드는 중요한 것부터 놓는다 (세 단계로만 나눠서 작은 차이로 자리가 바뀌지 않게 한다).
+            let mut free: Vec<&&Card> = mine.iter().filter(|c| c.grid.is_none()).collect();
+            free.sort_by_key(|c| -((view.importance.get(&c.id).copied().unwrap_or(0.5) * 2.99) as i32));
+            for c in free {
+                let (w, h) = (width_of(c), eff_h(c, view));
+                let mut row = 0;
+                let (col, row) = 'find: loop {
+                    for col in 0..=(limit - w) {
+                        if (col..col + w).all(|cx| (row..row + h).all(|cy| !used.contains(&(cx, cy)))) {
+                            break 'find (col, row);
+                        }
+                    }
+                    row += 1;
+                };
+                occupy(&mut used, col, row, w, h);
+                placed.push((*c, col, row, w, h));
+            }
+            let ncols = placed.iter().map(|p| p.1 + p.3).max().unwrap_or(1);
+            let nrows = placed.iter().map(|p| p.2 + p.4).max().unwrap_or(1);
+            // 오른쪽에 빈 칸이 남은 카드는 그만큼 넓힌다 (구역 안에 구멍이 남지 않게). 사용자가 자리를 정한 카드는 그대로 둔다.
+            let mut order: Vec<usize> = (0..placed.len()).collect();
+            order.sort_by_key(|i| (placed[*i].2, placed[*i].1));
+            for i in order {
+                let (c, col, row, mut w, h) = placed[i];
+                if c.pinned || c.grid.is_some() {
+                    continue;
                 }
-                w += 1;
+                while col + w < ncols && (row..row + h).all(|cy| !used.contains(&(col + w, cy))) {
+                    for cy in row..row + h {
+                        used.insert((col + w, cy));
+                    }
+                    w += 1;
+                }
+                placed[i].3 = w;
             }
-            placed[i].3 = w;
+            (placed, ncols, nrows)
+        };
+        let natural = |ncols: i32, nrows: i32| vec2(ncols as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD, ZONE_HEAD + nrows as f32 * (CH + GAP) - GAP + ZONE_PAD);
+        let mut best: Option<(f32, i32, Vec<(&Card, i32, i32, i32, i32)>, i32, i32)> = None;
+        for limit in lo..=hi.max(lo) {
+            let (placed, ncols, nrows) = place(limit);
+            let n = natural(ncols, nrows);
+            let k = (room.x / n.x).min(room.y / n.y).min(1.0);
+            // 눈에 띄게 더 크게 들어올 때만 칸을 늘린 배치로 바꾼다 (같으면 카드가 큰 쪽).
+            if best.as_ref().map(|b| k > b.0 + 0.02).unwrap_or(true) {
+                best = Some((k, limit, placed, ncols, nrows));
+            }
+            if k >= 1.0 {
+                break;
+            }
         }
-        // 구역이 자기 몫의 가로 폭을 다 쓰도록 칸을 늘린다. 카드가 너무 넓적해지지 않게 1.6배까지만.
-        let share = if limit == half && half >= 4 { (width - ZONE_GAP) / 2.0 } else { width };
-        let cw = (((share - 2.0 * ZONE_PAD) - (ncols - 1) as f32 * GAP) / ncols as f32).clamp(CW, CW * 1.6);
-        let size = vec2(
-            ncols as f32 * (cw + GAP) - GAP + 2.0 * ZONE_PAD,
-            ZONE_HEAD + nrows as f32 * (CH + GAP) - GAP + ZONE_PAD,
-        );
+        let (k, limit, placed, ncols, nrows) = best.expect("칸 수 후보는 하나 이상이다");
+        // 그 축소 비율에서 화면의 가로를 다 쓰도록 칸을 늘린다. 카드가 너무 넓적해지지 않게 1.6배까지만.
+        let cw = (((room.x / k - 2.0 * ZONE_PAD) - (ncols - 1) as f32 * GAP) / ncols as f32).clamp(CW, CW * 1.6 / k);
+        let size = vec2(ncols as f32 * (cw + GAP) - GAP + 2.0 * ZONE_PAD, natural(ncols, nrows).y);
         if x > 0.0 && x + size.x > width + 1.0 {
             x = 0.0;
             y += shelf_h + ZONE_GAP;
@@ -537,7 +558,7 @@ pub fn board(
         let full_area = ui.available_rect_before_wrap();
 
         // "내 차례": 판 위가 아니라 화면 오른쪽에 고정된다 (확대·축소와 상관없이 항상 같은 자리, 같은 크기).
-        let (inbox_slots, inbox_zones) = layout(board, INBOX_COLS as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD, view, Some(NO_GROUP), true);
+        let (inbox_slots, inbox_zones) = layout(board, INBOX_COLS as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD, full_area.size(), view, Some(NO_GROUP), true);
         let inbox = inbox_zones.into_iter().find(|z| z.inbox);
         // "내 차례" 구역이 오른쪽을 가리므로, 내용은 그 왼쪽 자리에 맞춘다.
         let covered = 0.0_f32;
@@ -546,7 +567,7 @@ pub fn board(
         // 판은 "내 차례" 구역의 왼쪽만 쓴다. 판 위의 내용이 그 구역 밑으로 들어가 가려지는 일이 없다.
         let area = Rect::from_min_max(full_area.min, pos2((full_area.right() - covered).max(full_area.left() + 200.0), full_area.bottom()));
         let open = area.size();
-        let (mut slots, zones, regions, bounds) = world(board, view, open.x - 36.0);
+        let (mut slots, zones, regions, bounds) = world(board, view, open.x - 36.0, open);
         slots.extend(inbox_slots);
         // 지금 화면에 없는 카드의 전환 상태는 버린다.
         view.cards.retain(|id, v| v.dying.is_some() || slots.contains_key(id));
@@ -614,10 +635,30 @@ pub fn board(
             if let Some(z) = zones.iter().find(|z| z.id == topic) {
                 let zr = Rect::from_min_size(z.min.to_pos2(), z.size);
                 // 구역이 다 들어오는 크기로, 그러나 읽을 수 있는 크기 아래로는 줄이지 않는다.
-                let k = (open.x / (zr.width() + 32.0)).clamp(READABLE, 1.0);
-                view.fly = Some((scene, inside(widen(Rect::from_min_size(zr.min - vec2(16.0, 16.0), open / k))), now));
+                let k = (open.x / (zr.width() + 32.0)).min(open.y / (zr.height() + 32.0)).clamp(FIT_MIN * 0.9, 1.0);
+                let target = inside(widen(Rect::from_min_size(zr.min - vec2(16.0, 16.0), open / k)));
+                view.fly = Some((scene, target, now));
                 view.bounce = false;
                 view.goto = None;
+                view.docked = Some((topic, target));
+            }
+        }
+        // 맞춰 둔 구역의 크기가 달라졌으면 다시 맞춘다 (카드가 생기거나 내용에 맞게 줄어든 뒤에도 한 화면에 들어오게).
+        if view.fly.is_none() {
+            if let Some((topic, last)) = view.docked.clone() {
+                let close = |a: Rect, b: Rect| (a.min - b.min).length() < 3.0 && (a.max - b.max).length() < 3.0;
+                match zones.iter().find(|z| z.id == topic) {
+                    Some(z) if close(scene, last) => {
+                        let zr = Rect::from_min_size(z.min.to_pos2(), z.size);
+                        let k = (open.x / (zr.width() + 32.0)).min(open.y / (zr.height() + 32.0)).clamp(FIT_MIN * 0.9, 1.0);
+                        let target = inside(widen(Rect::from_min_size(zr.min - vec2(16.0, 16.0), open / k)));
+                        if !close(last, target) {
+                            view.fly = Some((scene, target, now));
+                            view.docked = Some((topic, target));
+                        }
+                    }
+                    _ => view.docked = None, // 사용자가 화면을 옮겼거나 그 구역이 없어졌다
+                }
             }
         }
         // AI 가 방금 고친 주제가 화면 밖에 있거나 너무 작게 보이면 그쪽으로 날아간다.
@@ -625,11 +666,13 @@ pub fn board(
             if let Some(z) = zones.iter().find(|z| z.id == topic) {
                 let zr = Rect::from_min_size(z.min.to_pos2(), z.size);
                 let zoom_now = area.width() / scene.width();
-                if !scene.contains_rect(zr) || zoom_now < 0.55 {
-                    // 구역이 커서 한 화면에 안 들어오면, 읽을 수 있는 크기를 지키고 구역의 왼쪽 위부터 보여 준다.
-                    let fitted = frame(zr.expand(40.0), open, 1.0);
-                    let target = if open.x / fitted.width() < READABLE { Rect::from_min_size(zr.min - vec2(30.0, 30.0), open / READABLE) } else { fitted };
-                    view.fly = Some((scene, inside(widen(target)), now));
+                // 구역 전체가 화면에 들어오는 크기로, 왼쪽 위에 붙여서 본다. 이미 그렇게 보고 있으면 움직이지 않는다.
+                let k = (open.x / (zr.width() + 32.0)).min(open.y / (zr.height() + 32.0)).clamp(FIT_MIN * 0.9, 1.0);
+                let target = inside(widen(Rect::from_min_size(zr.min - vec2(16.0, 16.0), open / k)));
+                let there = (scene.min - target.min).length() < 3.0 && (scene.width() - target.width()).abs() < 3.0;
+                if !there && (!scene.contains_rect(zr) || zoom_now < 0.55) {
+                    view.fly = Some((scene, target, now));
+                    view.docked = Some((topic.clone(), target));
                 }
             }
         }
@@ -651,16 +694,16 @@ pub fn board(
 
 
         // 카드는 이만큼 가까워져야 보인다. 그 전에는 주제 이름만 보인다.
-        let cards_seen = smooth(zoom, 0.40, 0.48);
+        let cards_seen = smooth(zoom, 0.30, 0.38);
 
         let mut busy = false;
         let webs_start = webs.len();
         let scene_now = scene;
         let mut draw_cards = |ui: &mut egui::Ui, sticky_pass: bool, origin: Pos2, zoom: f32| {
             // 멀어질수록 내용 → 제목 → 상자 순으로 사라진다.
-            let detail = smooth(zoom, 0.62, 0.78);
-            let title_a = smooth(zoom, 0.50, 0.60);
-            let box_a = smooth(zoom, 0.40, 0.48);
+            let detail = smooth(zoom, 0.44, 0.52);
+            let title_a = smooth(zoom, 0.38, 0.46);
+            let box_a = smooth(zoom, 0.30, 0.38);
             let handy = detail > 0.6; // 이만큼 가까워야 카드를 누르고 끌 수 있다
         // 그리는 순서: 사라지는 카드 → 보통 카드 → 끌고 있는 카드
         let mut order: Vec<(u8, String)> = view
@@ -1009,10 +1052,25 @@ pub fn board(
                 let mid_here = if grouped { mid } else { 1.0 - cards_seen };
                 if mid_here > 0.02 {
                     // 중간: 카드가 안 보이므로 구역 한가운데에 이름을 크게
-                    let size = fit(&z.name, r.width() - 24.0, (16.0 / zoom).min(r.height() * 0.4));
+                    // 이름이 길면 줄을 바꿔서 상자 폭을 다 쓴다. 한 줄에 억지로 넣느라 글자가 작아지지 않게 한다.
+                    // 화면에서 20픽셀쯤으로 보이는 크기에서 시작해, 상자에 들어갈 때까지만 줄인다.
                     let mut np = zp.with_clip_rect(r.shrink(6.0).intersect(zp.clip_rect()));
                     np.set_opacity(appear * mid_here);
-                    np.text(r.center(), Align2::CENTER_CENTER, &z.name, bold(size), TEXT());
+                    let (room_w, room_h) = (r.width() - 28.0 / zoom.max(0.2), r.height() - 20.0 / zoom.max(0.2));
+                    let mut size = (20.0 / zoom).min(r.height() * 0.3).max(8.0);
+                    let mut galley = np.layout(z.name.clone(), bold(size), TEXT(), room_w.max(20.0));
+                    for _ in 0..8 {
+                        if galley.size().y <= room_h && galley.size().x <= room_w + 1.0 {
+                            break;
+                        }
+                        size *= 0.88;
+                        galley = np.layout(z.name.clone(), bold(size), TEXT(), room_w.max(20.0));
+                    }
+                    // 여러 줄이면 가운데로 모은다.
+                    let mut job = egui::text::LayoutJob::simple(z.name.clone(), bold(size), TEXT(), room_w.max(20.0));
+                    job.halign = egui::Align::Center;
+                    let galley = np.fonts_mut(|f| f.layout_job(job));
+                    np.galley(pos2(r.center().x, r.center().y - galley.size().y / 2.0), galley, TEXT());
                 }
                 // 방금 한 말이 이 주제의 이야기라고 판단되면, 답이 오기 전부터 이 구역 테두리에 선이 돈다.
                 if hot_zone == Some(z.id.as_str()) {
@@ -1111,20 +1169,21 @@ struct Region {
 const MIN_ZOOM: f32 = 0.06;
 const T_FLY: f64 = 0.6;
 const T_BOUNCE: f64 = 0.5;
-const REGION_W: f32 = 1500.0;
+/// 한 화면에 맞춘 구역이 둘쯤 나란히 놓이는 폭
+const REGION_W: f32 = 2400.0;
+/// 한 주제를 한 화면에 넣으려고 축소할 때의 한도. 이보다 작아지면 글자를 읽기 어렵다.
+const FIT_MIN: f32 = 0.62;
 const REGION_GAP: f32 = 200.0;
 const REGION_PAD: f32 = 40.0;
 /// 분류 이름은 영역 위에 적으므로 영역 안쪽 위 여백은 작다.
 const REGION_HEAD: f32 = 40.0;
-/// 주제로 날아갈 때 이보다 작게 축소하지 않는다 (카드 글자를 읽을 수 있는 크기).
-const READABLE: f32 = 0.8;
 
 /// 판 전체의 배치. 분류마다 영역을 하나씩 잡고, 그 안에 그 분류의 주제 구역들을 놓는다.
 /// 분류가 하나도 없으면 영역 없이 주제 구역만 놓인다.
-fn world(board: &Board, view: &View, plain_width: f32) -> (HashMap<String, Slot>, Vec<Zone>, Vec<Region>, Rect) {
+fn world(board: &Board, view: &View, plain_width: f32, screen: Vec2) -> (HashMap<String, Slot>, Vec<Zone>, Vec<Region>, Rect) {
     if board.groups.is_empty() {
         // 분류가 없을 때는 화면 폭에 맞춰 놓아서 제 크기 그대로 보이게 한다.
-        let (slots, zones) = layout(board, plain_width, view, None, false);
+        let (slots, zones) = layout(board, plain_width, screen, view, None, false);
         let max = zones.iter().fold(Vec2::ZERO, |m, z| m.max(z.min + z.size));
         return (slots, zones, Vec::new(), Rect::from_min_size(Pos2::ZERO, max));
     }
@@ -1137,7 +1196,7 @@ fn world(board: &Board, view: &View, plain_width: f32) -> (HashMap<String, Slot>
     let wrap_at = REGION_W * 3.0 + REGION_GAP * 2.0 + 6.0 * REGION_PAD;
     let mut max = Vec2::ZERO;
     for (gid, name) in keys {
-        let (s, z) = layout(board, REGION_W, view, Some(gid.as_str()), false);
+        let (s, z) = layout(board, REGION_W, screen, view, Some(gid.as_str()), false);
         if z.is_empty() {
             continue;
         }

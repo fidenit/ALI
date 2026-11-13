@@ -235,7 +235,13 @@ focus n3
 
 fn demo(turn_no: usize, send: &dyn Fn(Msg)) -> Result<Stats, String> {
     let started = Instant::now();
-    let script = SCENES[turn_no % SCENES.len()];
+    // 확인·소개용: LYBOARD_DEMO_FILE 이 있으면 그 파일의 장면들(=== 줄로 나눔)을 쓴다.
+    let custom: Vec<String> = std::env::var("LYBOARD_DEMO_FILE")
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|t| t.replace("\r\n", "\n").split("\n===\n").map(|s| s.trim().to_string() + "\n").collect())
+        .unwrap_or_default();
+    let script: &str = if custom.is_empty() { SCENES[turn_no % SCENES.len()] } else { &custom[turn_no % custom.len()] };
     std::thread::sleep(Duration::from_millis(500));
     let first_ms = started.elapsed().as_millis() as u64;
     let chars: Vec<char> = script.chars().collect();
@@ -244,7 +250,7 @@ fn demo(turn_no: usize, send: &dyn Fn(Msg)) -> Result<Stats, String> {
         std::thread::sleep(Duration::from_millis(9));
     }
     Ok(Stats {
-        model: "시연 대본".into(),
+        model: crate::sys::tr("시연 대본", "demo script").into(),
         output_tokens: (chars.len() / 2) as u64,
         first_ms,
         total_ms: started.elapsed().as_millis() as u64,
