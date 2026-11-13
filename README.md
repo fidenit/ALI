@@ -46,9 +46,9 @@ Nothing like it existed, so we built it. We hope it makes working with AI less t
 
 ## Try it
 
-You need a [Claude API key](https://console.anthropic.com/). Usage is billed to your own account.
+You can look around without anything: with no key, ALI opens in a demo that plays prepared scenes and says so on screen. To really use it you need a [Claude API key](https://console.anthropic.com/settings/keys). Usage is billed to your own account. The key can also come from the `ANTHROPIC_API_KEY` environment variable.
 
-**Windows.** Download the zip from [Releases](https://github.com/fidenit/ALI/releases), unpack it and run `ali.exe`. There is no installer. The first screen asks for your key. The build in Releases can be older than `main`.
+**Windows.** Download the zip from [Releases](https://github.com/fidenit/ALI/releases), unpack it and run `ali.exe`. There is no installer. On first start a window asks for your key; you can skip it and stay in the demo.
 
 **Mac.** Build it yourself for now: `./run.sh pack` creates `portable/ALI/ALI.app`. See [DEVELOPING](docs/DEVELOPING.md).
 

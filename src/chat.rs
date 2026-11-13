@@ -1,4 +1,4 @@
-﻿//! 왼쪽에 고정된 대화 구역: 주고받은 말, 진행 표시, 입력창, 버튼.
+//! 왼쪽에 고정된 대화 구역: 주고받은 말, 진행 표시, 입력창, 버튼.
 
 use eframe::egui;
 
@@ -102,11 +102,10 @@ impl App {
                             self.buttons(ui, ctx);
                             ui.add_space(8.0);
                             self.shelf_row(ui);
+                            self.input_box(ui, ctx);
+                            self.pics_row(ui);
                             if self.cfg.key.is_none() && std::env::var("LYBOARD_DEMO").is_err() {
-                                self.key_setup(ui);
-                            } else {
-                                self.input_box(ui, ctx);
-                                self.pics_row(ui);
+                                self.demo_row(ui);
                             }
                             ui.add_space(8.0);
                             if let Some(e) = self.error.clone() {
@@ -550,27 +549,95 @@ impl App {
         }
     }
 
-    /// 처음 쓰는 사람을 위한 화면: API 키를 넣으면 프로그램 폴더에 저장하고 바로 시작한다.
-    fn key_setup(&mut self, ui: &mut egui::Ui) {
-        let field = |ui: &mut egui::Ui, value: &mut String, hint: &str| {
-            egui::Frame::new().fill(FIELD()).stroke(egui::Stroke::new(1.0, FIELD_EDGE())).corner_radius(14).inner_margin(egui::Margin::symmetric(14, 9)).show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(value)
-                        .password(true)
-                        .hint_text(hint)
-                        .desired_width(f32::INFINITY)
-                        .font(egui::FontId::proportional(13.5))
-                        .text_color(ui::TEXT())
-                        .frame(egui::Frame::NONE),
-                )
-            });
-        };
-        // 아래에서 위로 쌓이므로 버튼이 먼저 온다.
-        let ready = self.key_input.trim().len() > 20;
-        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
-        p.rect_filled(r.rect, 20.0, if ready { ui::TEXT() } else { FIELD() });
-        p.text(r.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("저장하고 시작", "Save and start"), ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
-        if ready && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+    /// 키가 없을 때 입력창 위에 놓는 줄: 지금은 데모라는 것을 알리고, 키를 넣는 창을 다시 열 수 있게 한다.
+    fn demo_row(&mut self, ui: &mut egui::Ui) {
+        let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+        p.rect_filled(r.rect, 12.0, ui::ORANGE().gamma_multiply(0.12));
+        let tag = Rect::from_min_size(r.rect.min + egui::vec2(8.0, 6.0), egui::vec2(48.0, 18.0));
+        p.rect_filled(tag, 9.0, ui::ORANGE());
+        p.text(tag.center(), egui::Align2::CENTER_CENTER, "DEMO", ui::bold(10.5), PANEL());
+        let button = Rect::from_min_size(egui::pos2(r.rect.right() - 112.0, r.rect.top() + 5.0), egui::vec2(106.0, 20.0));
+        let words = p.with_clip_rect(Rect::from_min_max(r.rect.min, egui::pos2(button.left() - 6.0, r.rect.bottom())));
+        words.text(
+            egui::pos2(tag.right() + 8.0, r.rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            crate::sys::tr("API 키 없음 · 준비된 장면만 재생", "No API key · prepared scenes only"),
+            ui::font(11.5),
+            ui::TEXT(),
+        );
+        let br = ui.interact(button, ui.scope_id().with("open-key"), egui::Sense::click());
+        p.rect_stroke(button, 10.0, egui::Stroke::new(1.0, if br.hovered() { ui::TEXT() } else { ui::DIM() }), egui::StrokeKind::Inside);
+        p.text(button.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("API 키 넣기", "Enter API key"), ui::bold(11.0), ui::TEXT());
+        if br.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.key_popup = true;
+        }
+        ui.add_space(6.0);
+    }
+
+    /// 처음 켰을 때(또는 "API 키 넣기"를 눌렀을 때) 뜨는 창.
+    /// 키를 넣으면 프로그램 폴더의 key.txt 에 저장하고 바로 시작한다. 키 없이 데모만 둘러볼 수도 있다.
+    pub fn key_window(&mut self, ctx: &egui::Context) {
+        if !self.key_popup {
+            return;
+        }
+        let frame = egui::Frame::new().fill(PANEL()).stroke(egui::Stroke::new(1.0, FIELD_EDGE())).corner_radius(24).inner_margin(egui::Margin::same(28));
+        let (mut save, mut close) = (false, false);
+        egui::Modal::new(egui::Id::unique("key-window")).frame(frame).backdrop_color(egui::Color32::from_black_alpha(170)).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(egui::RichText::new(crate::sys::tr("ALI에 오신 것을 환영합니다", "Welcome to ALI")).font(ui::bold(21.0)).color(ui::TEXT()));
+            ui.add_space(8.0);
+            ui.label(
+                egui::RichText::new(crate::sys::tr(
+                    "ALI는 Claude로 움직입니다. 본인의 Claude API 키를 넣으면 바로 시작합니다.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고, Anthropic 말고는 어디로도 보내지지 않습니다.",
+                    "ALI runs on Claude. Enter your own Claude API key to start.\nThe key is saved only to key.txt in this program's folder and is sent nowhere except Anthropic.",
+                ))
+                .size(12.5)
+                .color(ui::DIM()),
+            );
+            ui.add_space(14.0);
+            let field = |ui: &mut egui::Ui, value: &mut String, hint: &str| {
+                egui::Frame::new().fill(FIELD()).stroke(egui::Stroke::new(1.0, FIELD_EDGE())).corner_radius(14).inner_margin(egui::Margin::symmetric(14, 9)).show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(value)
+                            .password(true)
+                            .hint_text(hint)
+                            .desired_width(f32::INFINITY)
+                            .font(egui::FontId::proportional(13.5))
+                            .text_color(ui::TEXT())
+                            .frame(egui::Frame::NONE),
+                    )
+                });
+            };
+            field(ui, &mut self.key_input, crate::sys::tr("Claude API 키 (sk-ant-…)", "Claude API key (sk-ant-…)"));
+            ui.add_space(6.0);
+            field(ui, &mut self.jev_input, crate::sys::tr("TypeSafe Jev 키 (선택 · 없어도 됩니다)", "TypeSafe Jev key (optional)"));
+            ui.add_space(6.0);
+            let link = ui.add(egui::Label::new(egui::RichText::new(crate::sys::tr("키가 없으신가요? Claude Console에서 만들기 ↗", "No key yet? Create one in the Claude Console ↗")).size(12.0).color(ui::ORANGE())).sense(egui::Sense::click()));
+            if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                ctx.open_url(egui::OpenUrl::new_tab("https://console.anthropic.com/settings/keys"));
+            }
+            ui.add_space(16.0);
+            let ready = self.key_input.trim().len() > 20;
+            let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 42.0), egui::Sense::click());
+            p.rect_filled(r.rect, 21.0, if ready { ui::TEXT() } else { FIELD() });
+            p.text(r.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("저장하고 시작", "Save and start"), ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
+            if ready && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                save = true;
+            }
+            ui.add_space(8.0);
+            let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
+            p.rect_stroke(r.rect, 19.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
+            let has_key = self.cfg.key.is_some();
+            p.text(r.rect.center(), egui::Align2::CENTER_CENTER, if has_key { crate::sys::tr("닫기", "Close") } else { crate::sys::tr("키 없이 데모 둘러보기", "Look around the demo without a key") }, ui::bold(13.0), ui::TEXT());
+            if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                close = true;
+            }
+            if !has_key {
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new(crate::sys::tr("데모에서는 무엇을 입력해도 준비된 장면이 재생됩니다. AI가 실제로 답하지는 않습니다.", "In the demo, anything you type plays prepared scenes. The AI does not actually answer.")).size(11.5).color(ui::FAINT()));
+            }
+        });
+        if save {
             let base = sys::base_dir();
             let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
             if !self.jev_input.trim().is_empty() {
@@ -579,17 +646,13 @@ impl App {
             self.key_input.clear();
             self.jev_input.clear();
             self.cfg = llm::Config::load();
+            self.recent.clear();
+            self.view = ui::View::default();
             self.start_real_mode();
+            self.key_popup = false;
         }
-        ui.add_space(8.0);
-        field(ui, &mut self.jev_input, crate::sys::tr("TypeSafe Jev 키 (선택 · 없어도 됩니다)", "TypeSafe Jev key (optional)"));
-        ui.add_space(6.0);
-        field(ui, &mut self.key_input, crate::sys::tr("Claude API 키 (sk-ant-…)", "Claude API key (sk-ant-…)"));
-        ui.add_space(8.0);
-        ui.label(
-            egui::RichText::new(crate::sys::tr("처음이시군요. 본인의 Claude API 키를 넣어 주세요.\n키는 이 프로그램 폴더의 key.txt 에만 저장되고 다른 곳으로 보내지지 않습니다.", "First time here. Enter your own Claude API key.\nIt is saved only to key.txt in this program's folder and sent nowhere else."))
-                .size(12.5)
-                .color(ui::DIM()),
-        );
+        if close {
+            self.key_popup = false;
+        }
     }
 }

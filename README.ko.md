@@ -46,9 +46,9 @@ ALI가 그 한곳이다. 필요한 것을 말하면 AI가 화면을 직접 짠�
 
 ## 써 보기
 
-[Claude API 키](https://console.anthropic.com/)가 필요하다. 요금은 본인 계정에 청구된다.
+아무것도 없이 둘러볼 수 있다. 키가 없으면 준비된 장면을 재생하는 데모로 열리고, 화면에 데모라고 표시된다. 실제로 쓰려면 [Claude API 키](https://console.anthropic.com/settings/keys)가 필요하다. 요금은 본인 계정에 청구된다. 키는 환경 변수 `ANTHROPIC_API_KEY`로 줄 수도 있다.
 
-**Windows.** [Releases](https://github.com/fidenit/ALI/releases)에서 zip을 받아 풀고 `ali.exe`를 실행한다. 설치는 없다. 처음 화면에서 키를 넣는다. Releases의 묶음은 `main`보다 오래된 것일 수 있다.
+**Windows.** [Releases](https://github.com/fidenit/ALI/releases)에서 zip을 받아 풀고 `ali.exe`를 실행한다. 설치는 없다. 처음 켜면 키를 묻는 창이 뜬다. 건너뛰고 데모로 둘러봐도 된다.
 
 **Mac.** 지금은 직접 빌드한다. `./run.sh pack`이 `portable/ALI/ALI.app`을 만든다. [개발자용 안내](docs/DEVELOPING.md)를 본다.
 

@@ -1,4 +1,4 @@
-﻿//! 한 턴을 별도 스레드에서 돌리고, 일어나는 일을 화면 쪽으로 넘긴다.
+//! 한 턴을 별도 스레드에서 돌리고, 일어나는 일을 화면 쪽으로 넘긴다.
 //! 실제 호출과 도구 실행은 agent.rs 에 있다. API 키가 없으면 같은 경로로 시연 대본을 흘려보낸다.
 
 use std::sync::mpsc::Sender;
@@ -233,6 +233,76 @@ focus n3
 ",
 ];
 
+const SCENES_EN: [&str; 3] = [
+    "say Drafted four days in Jeju. Just pick the lodging.
+topic trip Jeju Trip
+card s1 status trip Status
+set s1 state run
+set s1 text Flights booked · lodging open
+card m1 metric trip Estimated total
+set m1 value $940
+set m1 delta -$60
+set m1 text for two, against a $1,000 budget
+card c1 chart trip 4x3 Where the money goes
+add c1 a Flights | 220
+add c1 b Lodging | 360
+add c1 c Car rental | 140
+add c1 d Food | 160
+add c1 e Other | 60
+card t1 timeline trip 3x4 Schedule
+add t1 d1 Day 1 | Arrive · Aewol coast road | todo
+add t1 d2 Day 2 | Hallasan, Yeongsil trail | todo
+add t1 d3 Day 3 | Seongsan · Udo island | todo
+add t1 d4 Day 4 | Dongmun market · fly home | todo
+card l1 checklist trip 3x3 Before you go
+add l1 i1 done | Pay for flights
+add l1 i2 todo | Book lodging
+add l1 i3 todo | Book the car
+add l1 i4 todo | Reserve the Hallasan trail
+card d1 decision trip 4x3 Lodging
+set d1 text Which one should I book?
+add d1 o1 Aewol seafront | $130 a night, 30 min from the airport, quiet
+add d1 o2 Seogwipo downtown | $110 a night, near restaurants, hard parking
+add d1 o3 Seongsan private house | $150 a night, walk to Sunrise Peak, far from the airport
+focus d1
+",
+    "say Lodging is in. Working through the bookings.
+del d1
+set s1 state ok
+set s1 text Flights · lodging booked
+upd l1 i2 done | Book lodging
+set m1 value $980
+set m1 delta -$20
+upd c1 b Lodging | 400
+card p1 progress trip 3x3 Bookings
+set p1 pct 60
+set p1 text Checking car rentals
+add p1 a done | Lodging paid
+add p1 b done | Confirmation received
+add p1 c run | Comparing car prices
+add p1 d todo | Reserve the Hallasan trail
+focus p1
+",
+    "say Compared three laptops.
+topic nb New Laptop
+card n1 table nb 6x3 Candidates
+set n1 cols Model | Weight | Battery | Price | In a line
+add n1 r1 A 14-inch | 1.24kg | 18h | $1,890 | Light and long-lasting
+add n1 r2 B 16-inch | 1.95kg | 12h | $2,390 | Big screen, more power
+add n1 r3 C 13-inch | 1.10kg | 15h | $1,590 | Cheapest, fewer ports
+card n2 chart nb 3x2 Price
+add n2 a A 14-inch | 1890
+add n2 b B 16-inch | 2390
+add n2 c C 13-inch | 1590
+card n3 decision nb 3x2 Priority
+set n3 text What matters most?
+add n3 o1 Portability | Carried every day
+add n3 o2 Performance | Video editing, builds
+add n3 o3 Price | Up to about $1,600
+focus n3
+",
+];
+
 fn demo(turn_no: usize, send: &dyn Fn(Msg)) -> Result<Stats, String> {
     let started = Instant::now();
     // 확인·소개용: LYBOARD_DEMO_FILE 이 있으면 그 파일의 장면들(=== 줄로 나눔)을 쓴다.
@@ -241,7 +311,8 @@ fn demo(turn_no: usize, send: &dyn Fn(Msg)) -> Result<Stats, String> {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .map(|t| t.replace("\r\n", "\n").split("\n===\n").map(|s| s.trim().to_string() + "\n").collect())
         .unwrap_or_default();
-    let script: &str = if custom.is_empty() { SCENES[turn_no % SCENES.len()] } else { &custom[turn_no % custom.len()] };
+    let built_in = if crate::sys::english() { SCENES_EN[turn_no % SCENES_EN.len()] } else { SCENES[turn_no % SCENES.len()] };
+    let script: &str = if custom.is_empty() { built_in } else { &custom[turn_no % custom.len()] };
     std::thread::sleep(Duration::from_millis(500));
     let first_ms = started.elapsed().as_millis() as u64;
     let chars: Vec<char> = script.chars().collect();

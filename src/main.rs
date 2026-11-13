@@ -78,6 +78,8 @@ struct App {
     /// 처음 쓰는 사람이 키를 넣는 칸
     key_input: String,
     jev_input: String,
+    /// 키를 넣는 창이 떠 있는가 (키 없이 처음 켰을 때 뜬다)
+    key_popup: bool,
     /// 화면 조작에 AI 가 반응할 예정 시각
     react_at: Option<std::time::Instant>,
     /// 사용자가 조작했고 AI 의 반응을 기다리는 카드
@@ -425,6 +427,7 @@ impl App {
             say_live: None,
             key_input: String::new(),
             jev_input: String::new(),
+            key_popup: false,
             react_at: None,
             pending: Default::default(),
             recent: Vec::new(),
@@ -534,6 +537,7 @@ impl App {
             });
         }
         // 시연 모드는 매번 빈 보드에서 시작한다. 실제 모드는 조작 기록을 재생해 보드를 되살린다.
+        app.key_popup = app.cfg.key.is_none() && std::env::var("LYBOARD_DEMO").is_err() && std::env::var("LYBOARD_NO_KEY_WINDOW").is_err();
         if !app.cfg.demo() {
             if std::env::args().any(|a| a == "--fresh") {
                 let _ = std::fs::remove_file(log_path());
@@ -1817,7 +1821,7 @@ impl App {
     fn status_line(&self) -> String {
         let mut parts = Vec::new();
         if self.cfg.demo() && self.promo.is_none() {
-            parts.push(if std::env::var("LYBOARD_DEMO").is_ok() { sys::tr("시연 모드 · 무엇을 입력해도 준비된 장면이 재생됩니다", "Demo mode · any input plays the prepared scenes") } else { sys::tr("API 키를 넣으면 시작합니다", "Enter an API key to start") }.to_string());
+            parts.push(if std::env::var("LYBOARD_DEMO").is_ok() { sys::tr("시연 모드 · 무엇을 입력해도 준비된 장면이 재생됩니다", "Demo mode · any input plays the prepared scenes") } else { sys::tr("데모 · API 키 없음", "Demo · no API key") }.to_string());
         }
         if let Some(s) = self.stats.as_ref().filter(|_| self.promo.is_none()) {
             parts.push(s.model.clone());
@@ -2038,6 +2042,7 @@ impl eframe::App for App {
                     ctx.request_repaint();
                 }
             });
+        self.key_window(&ctx);
         self.promo_frame(&ctx, talking);
     }
 }
