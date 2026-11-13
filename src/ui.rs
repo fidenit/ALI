@@ -1482,11 +1482,18 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             for (n, s) in stops.iter().enumerate() {
                 let size = p.layout_no_wrap(s.0.clone(), bold(12.0), TEXT()).size();
                 let m = marks[n];
+                // 옆, 위아래 가운데, 그리고 위아래에서 왼쪽·오른쪽으로 치우친 자리까지 본다 (곳들이 붙어 있을 때 겹치지 않게).
                 let spots = [
                     Rect::from_min_size(m + vec2(14.0, -size.y / 2.0), size),
                     Rect::from_min_size(m + vec2(-14.0 - size.x, -size.y / 2.0), size),
                     Rect::from_min_size(m + vec2(-size.x / 2.0, -16.0 - size.y), size),
                     Rect::from_min_size(m + vec2(-size.x / 2.0, 16.0), size),
+                    Rect::from_min_size(m + vec2(8.0 - size.x, -16.0 - size.y), size),
+                    Rect::from_min_size(m + vec2(8.0 - size.x, 16.0), size),
+                    Rect::from_min_size(m + vec2(-8.0, -16.0 - size.y), size),
+                    Rect::from_min_size(m + vec2(-8.0, 16.0), size),
+                    Rect::from_min_size(m + vec2(8.0 - size.x, -34.0 - size.y), size),
+                    Rect::from_min_size(m + vec2(8.0 - size.x, 34.0), size),
                 ];
                 let free = |r: &Rect| frame.contains_rect(*r) && !taken.iter().any(|t| t.expand(2.0).intersects(*r));
                 let r = spots.iter().find(|r| free(r)).or_else(|| spots.iter().find(|r| frame.contains_rect(**r))).copied().unwrap_or(spots[0]);
