@@ -149,7 +149,11 @@ fn start(input: &Value) -> Result<String, String> {
         return Err("title 과 order 가 필요함".into());
     }
     let mut cfg = Config::load();
-    let key = cfg.key.clone().ok_or("API 키가 없어 작업자를 띄울 수 없음")?;
+    // 작업자는 지금 엔진으로 돈다: Claude Code 엔진이면 Claude Code 로, 아니면 API 키로.
+    if cfg.key.is_none() && !cfg.cc {
+        return Err("API 키가 없어 작업자를 띄울 수 없음".into());
+    }
+    let key = cfg.key.clone().unwrap_or_default();
     cfg.effort = match input["effort"].as_str() {
         Some(e) if ["low", "medium", "high"].contains(&e) => e.to_string(),
         _ => "medium".into(),
@@ -235,8 +239,21 @@ fn start(input: &Value) -> Result<String, String> {
                 _ => None,
             }
         };
-        let role = agent::Role { system: WORKER, tools: tools::definitions(true), max_steps: MAX_STEPS, check: &check, tool: &tool };
-        let result = agent::run_as(&cfg, &key, &role, &first, &[], &send);
+        let result = if cfg.cc {
+            // Claude Code 가 하는 일을 진행 카드에 그대로 보여 준다 (이 엔진에는 progress 도구가 없다).
+            let shown = |m: Msg| {
+                if let Msg::Activity(a) = m {
+                    if !a.is_empty() {
+                        set(&id, |j| j.last = a.clone());
+                        emit(Event::Progress { id: id.clone(), pct: None, text: Some(a) });
+                    }
+                }
+            };
+            crate::cc::worker(&id, WORKER, &jdir, &cfg.effort, &first, &stop, &shown)
+        } else {
+            let role = agent::Role { system: WORKER, tools: tools::definitions(true), max_steps: MAX_STEPS, check: &check, tool: &tool };
+            agent::run_as(&cfg, &key, &role, &first, &[], &send)
+        };
         let secs = started.elapsed().as_secs();
         let (state, ok, report) = match result {
             Ok((stats, text)) => {

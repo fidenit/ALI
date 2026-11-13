@@ -1357,7 +1357,9 @@ impl App {
             };
             let turn_index = self.past.len();
             self.past.push(&turn);
-            if let (Some(key), false) = (self.cfg.key.clone(), self.tidying) {
+            // 기억 정리: API 키가 있으면 그것으로, Claude Code 엔진만 쓰면 Claude Code 를 통해서.
+            let keeper_key = self.cfg.key.clone().or_else(|| self.cfg.cc.then(|| cc::VIA.to_string()));
+            if let (Some(key), false) = (keeper_key, self.tidying) {
                 let events = self.turn_events.clone();
                 let (tx, wake) = (self.tx.clone(), self.wake.clone());
                 std::thread::spawn(move || {

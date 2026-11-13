@@ -138,11 +138,61 @@ fn describe(name: &str, input: &Value) -> String {
 
 /// 한 턴을 돌린다. 글자는 나오는 대로 `send` 로 보낸다. `stop` 이 켜지면 Claude Code 를 끝낸다.
 pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Arc<AtomicBool>, send: &dyn Fn(Msg)) -> Result<Stats, String> {
+    let system = crate::agent::system().to_string() + NOTE;
+    exec("cc-system.txt", &system, &crate::sys::base_dir(), effort, turn_text, images, stop, send).map(|(stats, _)| stats)
+}
+
+/// 작업자에게만 덧붙이는 지시.
+const WORKER_NOTE: &str = "
+
+# Running inside Claude Code
+
+You are running through Claude Code. The tools named above (shell, read_file, write_file, edit_file, list_dir, find_text, web_search, web_fetch, view_image) do not exist here: use your Claude Code tools instead (Bash or PowerShell, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch). The note tools are reached as `mcp__ali__note_search`, `mcp__ali__note_read`, `mcp__ali__note_write` and `mcp__ali__note_append`. There is no `progress` tool and no messages from the main session arrive while you work; what you are doing is shown to the user automatically. If a tool is refused for lack of permission, do not retry it: say so in your report. Your final message is your report.
+";
+
+/// 작업자 한 명을 Claude Code 로 돌린다. 마지막 글(보고서)도 돌려준다.
+pub fn worker(id: &str, system: &str, dir: &str, effort: &str, order: &str, stop: &Arc<AtomicBool>, send: &dyn Fn(Msg)) -> Result<(Stats, String), String> {
+    exec(&format!("cc-worker-{id}.txt"), &(system.to_string() + WORKER_NOTE), std::path::Path::new(dir), effort, order, &[], stop, send)
+}
+
+/// `agent::ask` 에서 키 자리에 이 값을 주면 API 대신 Claude Code 로 묻는다.
+pub const VIA: &str = "\u{1}claude-code";
+
+/// 도구 없이 한 번 묻고 답을 받는다 (기억 정리 같은 작은 일). 작은 모델을 쓴다.
+pub fn ask(system: &str, user: &str) -> Result<String, String> {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let dir = crate::sys::data_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(format!("cc-ask-{}.txt", N.fetch_add(1, Ordering::Relaxed) % 8));
+    std::fs::write(&file, system).map_err(|e| e.to_string())?;
+    let mut child = command()
+        .args(["-p", "--output-format", "json", "--no-session-persistence", "--tools", "", "--strict-mcp-config", "--model", "haiku", "--system-prompt-file"])
+        .arg(&file)
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Claude Code: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(user.as_bytes());
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let v: Value = serde_json::from_slice(&out.stdout).map_err(|e| format!("Claude Code 의 답을 읽지 못함: {e}"))?;
+    if v["is_error"].as_bool().unwrap_or(false) {
+        return Err(v["result"].as_str().unwrap_or("Claude Code error").chars().take(300).collect());
+    }
+    Ok(v["result"].as_str().unwrap_or("").to_string())
+}
+
+/// Claude Code 를 한 번 돌린다: 지시문을 덧붙이고, 글자는 나오는 대로 `send` 로 보낸다. (통계, 마지막 글)을 돌려준다.
+#[allow(clippy::too_many_arguments)]
+fn exec(tag: &str, system_text: &str, cwd: &std::path::Path, effort: &str, turn_text: &str, images: &[(String, String)], stop: &Arc<AtomicBool>, send: &dyn Fn(Msg)) -> Result<(Stats, String), String> {
     let started = Instant::now();
     let dir = crate::sys::data_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let system = dir.join("cc-system.txt");
-    std::fs::write(&system, crate::agent::system().to_string() + NOTE).map_err(|e| format!("지시문을 쓰지 못함: {e}"))?;
+    let system = dir.join(tag);
+    std::fs::write(&system, system_text).map_err(|e| format!("지시문을 쓰지 못함: {e}"))?;
 
     // 붙인 사진은 파일로 내려 주고 경로를 알려 준다 (Claude Code 가 Read 로 본다).
     let mut text = turn_text.to_string();
@@ -188,7 +238,7 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
     }
     cmd.args(extra.split_whitespace());
     let mut child = cmd
-        .current_dir(crate::sys::base_dir())
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -224,6 +274,7 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
 
     let mut stats = Stats { model: "Claude Code".into(), ..Default::default() };
     let mut failure: Option<String> = None;
+    let mut last_text = String::new();
     let mut got_result = false;
     let mut line_open = false; // 마지막으로 보낸 글자가 줄 끝이 아닌가
     for line in BufReader::new(stdout).lines() {
@@ -286,6 +337,7 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
                 stats.input_tokens = n("input_tokens") + n("cache_creation_input_tokens") + stats.cached_tokens;
                 stats.output_tokens = n("output_tokens");
                 stats.cost_usd = v["total_cost_usd"].as_f64().unwrap_or(0.0);
+                last_text = v["result"].as_str().unwrap_or("").to_string();
                 if v["is_error"].as_bool().unwrap_or(false) {
                     failure = Some(v["result"].as_str().unwrap_or("Claude Code error").chars().take(400).collect());
                 }
@@ -313,7 +365,7 @@ pub fn run(effort: &str, turn_text: &str, images: &[(String, String)], stop: &Ar
         crate::sys::log("cc.log", &format!("끝남 {code}: {errors}"));
         return Err(format!("{} ({code}) {tail}", crate::sys::tr("Claude Code 가 답 없이 끝났습니다. 로그인되어 있는지 확인해 주세요.", "Claude Code ended without an answer. Check that it is logged in.")));
     }
-    Ok(stats)
+    Ok((stats, last_text))
 }
 
 // ---------------------------------------------------------------- ALI 도구를 내주는 MCP 서버

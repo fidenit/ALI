@@ -45,6 +45,10 @@ pub fn http() -> ureq::Agent {
 
 /// 도구 없이 한 번 묻고 답을 글로 받는다 (기억 정리 같은 작은 뒷일에 쓴다).
 pub fn ask(key: &str, model: &str, system: &str, user: &str, max_tokens: u32) -> Result<String, String> {
+    // Claude Code 엔진만 쓰는 사람: API 키 없이 Claude Code 를 통해 묻는다.
+    if key == crate::cc::VIA {
+        return crate::cc::ask(system, user);
+    }
     let body = json!({ "model": model, "max_tokens": max_tokens, "system": system, "messages": [{ "role": "user", "content": user }] }).to_string();
     let mut resp = http()
         .post(URL)

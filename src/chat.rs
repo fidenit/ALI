@@ -648,9 +648,9 @@ impl App {
                 ui.label(
                     egui::RichText::new(crate::sys::tr(
                         "이 컴퓨터의 Claude Code에 맡깁니다. Claude Code의 로그인, CLAUDE.md, 스킬, 훅, MCP 서버, 권한 설정이 그대로 적용됩니다. API 키는 필요 없습니다.
-파일·명령·웹 작업은 Claude Code의 도구로 하고, 경로 지도와 기억 노트 같은 ALI 도구는 그대로 씁니다. 작업자와 기억 자동 정리는 API 키가 있을 때만 돕니다.",
+파일·명령·웹 작업은 Claude Code의 도구로 하고, 경로 지도, 기억, 작업자 같은 ALI 기능은 그대로 씁니다.",
                         "ALI hands each turn to the Claude Code on this computer. Its login, CLAUDE.md, skills, hooks, MCP servers and permission settings all apply. No API key is needed.
-Files, commands and the web go through Claude Code's tools; ALI's own tools such as route maps and memory notes keep working. Workers and automatic memory keeping still need an API key.",
+Files, commands and the web go through Claude Code's tools; ALI's own features such as route maps, memory and workers keep working.",
                     ))
                     .size(12.0)
                     .color(ui::DIM()),
