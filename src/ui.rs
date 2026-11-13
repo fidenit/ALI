@@ -1,4 +1,4 @@
-﻿//! 보드를 그린다. 배치 계산, 전환, 부품별 그리기, 사용자의 직접 조작.
+//! 보드를 그린다. 배치 계산, 전환, 부품별 그리기, 사용자의 직접 조작.
 //! 사용자의 조작은 화면 수정 언어 한 줄로 바꿔서 돌려준다 (AI 의 조작과 같은 경로를 탄다).
 //!
 //! 디자인: 무광 검정. 채도 없는 회색조, 큰 둥근 모서리, 굵은 제목과 숫자,
@@ -251,6 +251,7 @@ struct Slot {
     /// 보드 기준 위치 (픽셀)
     pos: Vec2,
     w: i32,
+    #[allow(dead_code)]
     h: i32,
     col: i32,
     row: i32,
@@ -261,6 +262,10 @@ struct Slot {
     limit: i32,
     /// 이 구역에서 한 칸의 가로 폭. 구역이 화면 폭을 채우도록 칸을 늘리므로 구역마다 다르다.
     cw: f32,
+    /// 카드의 세로 크기 (픽셀). 줄 높이는 그 줄에 놓인 카드들의 내용에 맞추므로 칸 수만으로는 정해지지 않는다.
+    ph: f32,
+    /// 이 구역에서 각 줄이 시작하는 세로 위치 (격자 시작점 기준). 끌어다 놓을 때 가까운 줄을 찾는 데 쓴다.
+    rows: std::rc::Rc<Vec<f32>>,
 }
 
 /// 주제 하나의 구역.
@@ -350,24 +355,62 @@ fn layout(board: &Board, width: f32, screen: Vec2, view: &View, only: Option<&st
             }
             (placed, ncols, nrows)
         };
-        let natural = |ncols: i32, nrows: i32| vec2(ncols as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD, ZONE_HEAD + nrows as f32 * (CH + GAP) - GAP + ZONE_PAD);
-        let mut best: Option<(f32, i32, Vec<(&Card, i32, i32, i32, i32)>, i32, i32)> = None;
+        // 줄 높이는 칸 단위로 끊지 않고 그 줄에 놓인 카드의 내용에 맞춘다. 칸 단위로 끊으면 카드마다 아래에 빈 자리가 남는다.
+        // 카드가 필요한 높이: 내용의 높이 (카드가 정한 칸 수를 넘지는 않는다). 사용자가 크기를 정한 카드는 정한 그대로.
+        let need_px = |c: &Card, h: i32| -> f32 {
+            let full = h as f32 * (CH + GAP) - GAP;
+            if c.pinned {
+                return full;
+            }
+            match view.cards.get(&c.id) {
+                Some(v) if v.content_h > 0.0 => (HEAD + v.content_h + 14.0).clamp(72.0, full),
+                _ => full,
+            }
+        };
+        // 각 줄의 높이: 끝나는 줄이 이른 카드부터, 카드가 걸친 줄들의 합이 필요한 높이가 되도록 마지막 줄을 늘린다.
+        let row_heights = |placed: &Vec<(&Card, i32, i32, i32, i32)>, nrows: i32| -> Vec<f32> {
+            let mut rh = vec![0.0_f32; nrows.max(1) as usize];
+            let mut order: Vec<usize> = (0..placed.len()).collect();
+            order.sort_by_key(|i| placed[*i].2 + placed[*i].4);
+            for i in order {
+                let (c, _, row, _, h) = placed[i];
+                let span = row as usize..(row + h) as usize;
+                let have: f32 = rh[span.clone()].iter().sum::<f32>() + (h - 1) as f32 * GAP;
+                let need = need_px(c, h);
+                if have < need {
+                    rh[span.end - 1] += need - have;
+                }
+            }
+            rh
+        };
+        let natural = |ncols: i32, rh: &Vec<f32>| vec2(ncols as f32 * (CW + GAP) - GAP + 2.0 * ZONE_PAD, ZONE_HEAD + rh.iter().sum::<f32>() + (rh.len() as f32 - 1.0) * GAP + ZONE_PAD);
+        let mut best: Option<(f32, i32, Vec<(&Card, i32, i32, i32, i32)>, i32, Vec<f32>)> = None;
         for limit in lo..=hi.max(lo) {
             let (placed, ncols, nrows) = place(limit);
-            let n = natural(ncols, nrows);
+            let rh = row_heights(&placed, nrows);
+            let n = natural(ncols, &rh);
             let k = (room.x / n.x).min(room.y / n.y).min(1.0);
             // 눈에 띄게 더 크게 들어올 때만 칸을 늘린 배치로 바꾼다 (같으면 카드가 큰 쪽).
             if best.as_ref().map(|b| k > b.0 + 0.02).unwrap_or(true) {
-                best = Some((k, limit, placed, ncols, nrows));
+                best = Some((k, limit, placed, ncols, rh));
             }
             if k >= 1.0 {
                 break;
             }
         }
-        let (k, limit, placed, ncols, nrows) = best.expect("칸 수 후보는 하나 이상이다");
+        let (k, limit, placed, ncols, rh) = best.expect("칸 수 후보는 하나 이상이다");
+        // 각 줄이 시작하는 위치
+        let mut tops = Vec::with_capacity(rh.len() + 1);
+        let mut acc = 0.0_f32;
+        for h in &rh {
+            tops.push(acc);
+            acc += h + GAP;
+        }
+        tops.push(acc);
+        let tops = std::rc::Rc::new(tops);
         // 그 축소 비율에서 화면의 가로를 다 쓰도록 칸을 늘린다. 카드가 너무 넓적해지지 않게 1.6배까지만.
         let cw = (((room.x / k - 2.0 * ZONE_PAD) - (ncols - 1) as f32 * GAP) / ncols as f32).clamp(CW, CW * 1.6 / k);
-        let size = vec2(ncols as f32 * (cw + GAP) - GAP + 2.0 * ZONE_PAD, natural(ncols, nrows).y);
+        let size = vec2(ncols as f32 * (cw + GAP) - GAP + 2.0 * ZONE_PAD, natural(ncols, &rh).y);
         if x > 0.0 && x + size.x > width + 1.0 {
             x = 0.0;
             y += shelf_h + ZONE_GAP;
@@ -376,8 +419,9 @@ fn layout(board: &Board, width: f32, screen: Vec2, view: &View, only: Option<&st
         let min = vec2(x, y);
         let origin = min + vec2(ZONE_PAD, ZONE_HEAD);
         for (c, col, row, w, h) in placed {
-            let pos = origin + vec2(col as f32 * (cw + GAP), row as f32 * (CH + GAP));
-            slots.insert(c.id.clone(), Slot { pos, w, h, col, row, origin, limit, sticky: false, cw });
+            let (top, end) = (tops[row as usize], tops[(row + h) as usize] - GAP);
+            let pos = origin + vec2(col as f32 * (cw + GAP), top);
+            slots.insert(c.id.clone(), Slot { pos, w, h, col, row, origin, limit, sticky: false, cw, ph: end - top, rows: tops.clone() });
         }
         zones.push(Zone { id: t.id.clone(), name: t.name.clone(), min, size, inbox: false });
         x += size.x + ZONE_GAP;
@@ -390,7 +434,7 @@ fn layout(board: &Board, width: f32, screen: Vec2, view: &View, only: Option<&st
                 Some(v) if v.content_h > 0.0 => (((HEAD + v.content_h + 12.0 + GAP) / (CH + GAP)).ceil() as i32).clamp(1, 12),
                 _ => eff_h(c, view),
             };
-            slots.insert(c.id.clone(), Slot { pos: vec2(0.0, 0.0), w: INBOX_COLS, h, col: 0, row: 0, origin: vec2(0.0, 0.0), limit: INBOX_COLS, sticky: true, cw: CW });
+            slots.insert(c.id.clone(), Slot { pos: vec2(0.0, 0.0), w: INBOX_COLS, h, col: 0, row: 0, origin: vec2(0.0, 0.0), limit: INBOX_COLS, sticky: true, cw: CW, ph: h as f32 * (CH + GAP) - GAP, rows: std::rc::Rc::new(Vec::new()) });
             let size = vec2(INBOX_COLS as f32 * (CW + GAP) - GAP, h as f32 * (CH + GAP) - GAP);
             zones.push(Zone { id: INBOX_ID.into(), name: "내 차례".into(), min: vec2(0.0, 0.0), size, inbox: true });
         }
@@ -613,7 +657,7 @@ pub fn board(
             // 카드의 자리가 정해진 뒤에 간다 (방금 만든 카드는 다음 프레임에 자리가 생긴다).
             if let Some(s) = slots.get(&id).filter(|s| !s.sticky) {
                 view.card_goto = None;
-                let size = vec2(s.w as f32 * (s.cw + GAP) - GAP, s.h as f32 * (CH + GAP) - GAP);
+                let size = vec2(s.w as f32 * (s.cw + GAP) - GAP, s.ph);
                 let card = Rect::from_min_size(s.pos.to_pos2(), size);
                 let zoom_now = area.width() / scene.width();
                 if zoom_now < 0.985 || !scene.shrink(8.0).contains_rect(card) {
@@ -722,10 +766,10 @@ pub fn board(
             let live = board.card(&cid);
             if let Some(c) = live {
                 let s = &slots[&c.id];
-                let (w, h) = (s.w as f32, s.h as f32);
+                let w = s.w as f32;
                 let target_pos = s.pos;
                 let cell_w = s.cw;
-                let target_size = vec2(w * cell_w + (w - 1.0) * GAP, h * CH + (h - 1.0) * GAP);
+                let target_size = vec2(w * cell_w + (w - 1.0) * GAP, s.ph);
                 let v = view.cards.entry(c.id.clone()).or_insert_with(|| CardView {
                     pos: Tween::fixed(target_pos),
                     size: Tween::fixed(target_size),
@@ -797,7 +841,13 @@ pub fn board(
                     // 놓은 자리를 그 주제 구역 안의 가장 가까운 칸으로 맞춘다.
                     let p = v.pos.at(now) - s.origin;
                     let ncol = ((p.x / (slots.get(&c.id).map(|x| x.cw).unwrap_or(CW) + GAP)).round() as i32).clamp(0, (s.limit - w).max(0));
-                    let nrow = ((p.y / (CH + GAP)).round() as i32).max(0);
+                    let nrow = if s.rows.len() >= 2 && p.y < s.rows[s.rows.len() - 1] {
+                        (0..s.rows.len() - 1).min_by(|a, b| (s.rows[*a] - p.y).abs().total_cmp(&(s.rows[*b] - p.y).abs())).unwrap_or(0) as i32
+                    } else {
+                        // 마지막 줄보다 아래: 그 아래로 칸 높이만큼씩 새 줄
+                        let last = s.rows.last().copied().unwrap_or(0.0);
+                        (s.rows.len() as i32 - 1).max(0) + (((p.y - last) / (CH + GAP)).round() as i32).max(0)
+                    };
                     lines.push(format!("move {} {} {}", c.id, ncol, nrow));
                 }
                 if body_resp.clicked() || head.clicked() {
@@ -1419,7 +1469,9 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
             let vals: Vec<f32> =
                 c.items.iter().map(|(_, cells)| cells.get(1).and_then(|v| v.replace(',', "").parse().ok()).unwrap_or(0.0)).collect();
             let unit = c.field("unit").to_string();
-            let h = body.height().max(150.0);
+            // 차트는 폭에 어울리는 높이까지만 쓴다. 카드가 더 커도 그 아래를 비워 두지 않고 카드가 줄어든다.
+            let cap = if c.field("form") == "line" { (w * 0.34).clamp(170.0, 300.0) } else { (c.items.len() as f32 * 24.0 + 40.0).clamp(190.0, 240.0) };
+            let h = body.height().max(150.0).min(cap);
             let k = cx.num("draw", 1.0);
             if k < 1.0 {
                 *cx.moving = true;
@@ -1654,7 +1706,44 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                 let (a, b) = t.split_once(',')?;
                 Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
             };
-            let at = |q: (f32, f32)| pos2(x + bw * q.0.clamp(0.0, 100.0) / 100.0, top + bh * q.1.clamp(0.0, 100.0) / 100.0);
+            // 좌표 0~100 은 카드가 정한 크기 전체를 뜻한다. 그림이 그중 일부만 쓰면 나머지는 빈 자리가 되므로,
+            // 그림이 실제로 차지하는 세로 범위만 남기고 카드도 그만큼만 차지하게 한다 (세로 비율은 그대로).
+            let full_h = (c.h as f32 * (CH + GAP) - GAP - HEAD - 14.0).max(60.0);
+            let unit = full_h / 100.0;
+            let (mut lo, mut hi) = (f32::MAX, f32::MIN);
+            for (_, cells) in &c.items {
+                let toks: Vec<&str> = cells.get(1).map(|s| s.split_whitespace().collect()).unwrap_or_default();
+                let mut see = |y: f32, pad: f32| {
+                    lo = lo.min(y.clamp(0.0, 100.0) - pad);
+                    hi = hi.max(y.clamp(0.0, 100.0) + pad);
+                };
+                match cells[0].as_str() {
+                    "rect" if toks.len() >= 2 => {
+                        if let (Some(min), Some(wh)) = (pair(toks[0]), pair(toks[1])) {
+                            see(min.1, 0.0);
+                            see(min.1 + wh.1, 0.0);
+                        }
+                    }
+                    "circle" if toks.len() >= 2 => {
+                        if let (Some(center), Ok(radius)) = (pair(toks[0]), toks[1].parse::<f32>()) {
+                            see(center.1, bw.min(full_h) * radius.clamp(0.5, 50.0) / 100.0 / unit);
+                        }
+                    }
+                    "text" => toks.iter().filter_map(|t| pair(t)).for_each(|q| see(q.1, 11.0 / unit)),
+                    // 선에 붙는 이름표는 선보다 조금 위에 놓인다
+                    _ => toks.iter().filter_map(|t| pair(t)).for_each(|q| see(q.1, 16.0 / unit)),
+                }
+            }
+            if lo > hi {
+                (lo, hi) = (0.0, 100.0);
+            }
+            let (lo, hi) = (lo.max(0.0), hi.min(100.0).max(lo.max(0.0) + 1.0));
+            let pad = 10.0;
+            let want = (hi - lo) * unit + 2.0 * pad;
+            // 자리가 더 넓으면 가운데에 두고, 좁으면 그 안에 들어오게 줄인다.
+            let scale = unit.min((bh - 2.0 * pad).max(20.0) / (hi - lo));
+            let y0 = top + (bh - (hi - lo) * scale) / 2.0;
+            let at = |q: (f32, f32)| pos2(x + bw * q.0.clamp(0.0, 100.0) / 100.0, y0 + (q.1.clamp(0.0, 100.0) - lo) * scale);
             for (item, cells) in &c.items {
                 let (rp, _) = cx.row(p, item);
                 let toks: Vec<&str> = cells.get(1).map(|s| s.split_whitespace().collect()).unwrap_or_default();
@@ -1702,7 +1791,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     }
                     "circle" if toks.len() >= 2 => {
                         if let (Some(center), Ok(radius)) = (pair(toks[0]), toks[1].parse::<f32>()) {
-                            let rad = bw.min(bh) * radius.clamp(0.5, 50.0) / 100.0;
+                            let rad = bw.min(full_h) * radius.clamp(0.5, 50.0) / 100.0 * (scale / unit);
                             rp.circle_filled(at(center), rad, color.gamma_multiply(0.12));
                             rp.circle_stroke(at(center), rad, Stroke::new(1.4, color));
                             rp.text(at(center), Align2::CENTER_CENTER, label, bold(size), TEXT());
@@ -1714,7 +1803,7 @@ fn draw_body(cx: &mut Ctx, p: &Painter, body: Rect, c: &Card) -> f32 {
                     _ => {}
                 }
             }
-            bh
+            want
         }
 
         Kind::Chart => {

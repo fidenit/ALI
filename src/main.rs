@@ -1922,7 +1922,7 @@ impl eframe::App for App {
                     g.sig = sig;
                     g.hot_until = std::time::Instant::now() + std::time::Duration::from_millis(1600);
                 }
-                let gap = if std::time::Instant::now() < g.hot_until || !self.fake_input.is_empty() || promo_moving { 130 } else { 1500 };
+                let gap = if std::time::Instant::now() < g.hot_until || !self.fake_input.is_empty() || promo_moving { std::env::var("LYBOARD_GIF_GAP").ok().and_then(|v| v.parse().ok()).unwrap_or(66) } else { 1500 };
                 g.last.elapsed().as_millis() >= gap
             } {
                 g.last = std::time::Instant::now();
