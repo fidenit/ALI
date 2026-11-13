@@ -4,7 +4,7 @@
 
 > A screen full of text is the worst way to use AI.
 
-Humanity built an extraordinary engine and bolted it to a wooden cart.
+Humanity built an extraordinary engine and bolted it to a wooden cart. The engine is AI. The cart is a chat window full of text.
 
 Every answer comes back as a scroll of paragraphs. Most of it goes unread. The chat window, a tool made for people typing to each other, became the place where we work with a machine that can do far more than type.
 
