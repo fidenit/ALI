@@ -179,6 +179,13 @@ impl App {
         {
             crate::sys::set_english(!crate::sys::english(), true);
         }
+        // 그 옆: 키 (Claude 키를 바꾸거나 Jev 키를 나중에 넣는다)
+        let k = Rect::from_min_size(egui::pos2(l.right() + 4.0, r.rect.top()), egui::vec2(54.0, 20.0));
+        let kr = ui.interact(k, ui.scope_id().with("keys"), egui::Sense::click());
+        p.text(k.left_center(), egui::Align2::LEFT_CENTER, crate::sys::tr("키", "Keys"), ui::font(11.0), if kr.hovered() { ui::TEXT() } else { ui::FAINT() });
+        if kr.on_hover_text(crate::sys::tr("API 키를 넣거나 바꿉니다", "Enter or change API keys")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            self.key_popup = true;
+        }
         if self.cfg.demo() {
             ui.add_space(2.0);
             return;
@@ -584,7 +591,9 @@ impl App {
         let (mut save, mut close) = (false, false);
         egui::Modal::new(egui::Id::unique("key-window")).frame(frame).backdrop_color(egui::Color32::from_black_alpha(170)).show(ctx, |ui| {
             ui.set_width(420.0);
-            ui.label(egui::RichText::new(crate::sys::tr("ALI에 오신 것을 환영합니다", "Welcome to ALI")).font(ui::bold(21.0)).color(ui::TEXT()));
+            let has_key = self.cfg.key.is_some();
+            let has_jev = crate::jev::key().is_some();
+            ui.label(egui::RichText::new(if has_key { crate::sys::tr("API 키", "API keys") } else { crate::sys::tr("ALI에 오신 것을 환영합니다", "Welcome to ALI") }).font(ui::bold(21.0)).color(ui::TEXT()));
             ui.add_space(8.0);
             ui.label(
                 egui::RichText::new(crate::sys::tr(
@@ -608,26 +617,43 @@ impl App {
                     )
                 });
             };
-            field(ui, &mut self.key_input, crate::sys::tr("Claude API 키 (sk-ant-…)", "Claude API key (sk-ant-…)"));
-            ui.add_space(6.0);
-            field(ui, &mut self.jev_input, crate::sys::tr("TypeSafe Jev 키 (선택 · 없어도 됩니다)", "TypeSafe Jev key (optional)"));
+            let caption = |ui: &mut egui::Ui, name: &str, state: &str, good: bool| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(name).font(ui::bold(12.5)).color(ui::TEXT()));
+                    ui.label(egui::RichText::new(state).size(11.5).color(if good { ui::GREEN() } else { ui::FAINT() }));
+                });
+                ui.add_space(4.0);
+            };
+            caption(ui, crate::sys::tr("Claude API 키", "Claude API key"), if has_key { crate::sys::tr("저장됨", "saved") } else { crate::sys::tr("필수", "required") }, has_key);
+            field(ui, &mut self.key_input, if has_key { crate::sys::tr("비워 두면 지금 키를 그대로 씁니다", "Leave empty to keep the current key") } else { "sk-ant-…" });
             ui.add_space(6.0);
             let link = ui.add(egui::Label::new(egui::RichText::new(crate::sys::tr("키가 없으신가요? Claude Console에서 만들기 ↗", "No key yet? Create one in the Claude Console ↗")).size(12.0).color(ui::ORANGE())).sense(egui::Sense::click()));
             if link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 ctx.open_url(egui::OpenUrl::new_tab("https://console.anthropic.com/settings/keys"));
             }
+            ui.add_space(14.0);
+            caption(ui, crate::sys::tr("TypeSafe Jev 키", "TypeSafe Jev key"), if has_jev { crate::sys::tr("저장됨", "saved") } else { crate::sys::tr("선택", "optional") }, has_jev);
+            field(ui, &mut self.jev_input, if has_jev { crate::sys::tr("비워 두면 지금 키를 그대로 씁니다", "Leave empty to keep the current key") } else { crate::sys::tr("없어도 됩니다", "Not needed to start") });
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(crate::sys::tr(
+                    "Jev는 글을 쓰지 않고 판단만 하는 작고 빠른 모델입니다. 넣으면 말이 어느 주제에 속하는지 미리 고르고, 중요한 카드를 앞에 놓고, 겹치는 주제를 정리하고, 옛 대화에서 필요한 것만 골라 옵니다. 없어도 ALI는 그대로 동작합니다.",
+                    "Jev is a small, fast model that only makes decisions. With it, ALI picks the topic before answering, puts important cards first, tidies overlapping topics, and recalls only the past conversations that matter. Without it, ALI works the same.",
+                ))
+                .size(11.5)
+                .color(ui::FAINT()),
+            );
             ui.add_space(16.0);
-            let ready = self.key_input.trim().len() > 20;
+            let ready = self.key_input.trim().len() > 20 || (has_key && self.jev_input.trim().len() > 8);
             let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 42.0), egui::Sense::click());
             p.rect_filled(r.rect, 21.0, if ready { ui::TEXT() } else { FIELD() });
-            p.text(r.rect.center(), egui::Align2::CENTER_CENTER, crate::sys::tr("저장하고 시작", "Save and start"), ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
+            p.text(r.rect.center(), egui::Align2::CENTER_CENTER, if has_key { crate::sys::tr("저장", "Save") } else { crate::sys::tr("저장하고 시작", "Save and start") }, ui::bold(13.5), if ready { PANEL() } else { ui::FAINT() });
             if ready && r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 save = true;
             }
             ui.add_space(8.0);
             let (r, p) = ui.allocate_painter(egui::vec2(ui.available_width(), 38.0), egui::Sense::click());
             p.rect_stroke(r.rect, 19.0, egui::Stroke::new(1.0, if r.hovered() { ui::DIM() } else { FIELD_EDGE() }), egui::StrokeKind::Inside);
-            let has_key = self.cfg.key.is_some();
             p.text(r.rect.center(), egui::Align2::CENTER_CENTER, if has_key { crate::sys::tr("닫기", "Close") } else { crate::sys::tr("키 없이 데모 둘러보기", "Look around the demo without a key") }, ui::bold(13.0), ui::TEXT());
             if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                 close = true;
@@ -639,16 +665,22 @@ impl App {
         });
         if save {
             let base = sys::base_dir();
-            let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
+            let was_demo = self.cfg.key.is_none();
+            if !self.key_input.trim().is_empty() {
+                let _ = std::fs::write(base.join("key.txt"), self.key_input.trim());
+            }
             if !self.jev_input.trim().is_empty() {
                 let _ = std::fs::write(base.join("jev.txt"), self.jev_input.trim());
             }
             self.key_input.clear();
             self.jev_input.clear();
             self.cfg = llm::Config::load();
-            self.recent.clear();
-            self.view = ui::View::default();
-            self.start_real_mode();
+            // 데모에서 넘어올 때만 화면을 비우고 실제 모드로 들어간다. 키만 바꾼 경우에는 하던 일을 그대로 둔다.
+            if was_demo && self.cfg.key.is_some() {
+                self.recent.clear();
+                self.view = ui::View::default();
+                self.start_real_mode();
+            }
             self.key_popup = false;
         }
         if close {
